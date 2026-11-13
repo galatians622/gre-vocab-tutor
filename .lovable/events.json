@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "events": {
+    "project.voice_answer_graded": {
+      "event_schema_version": 1,
+      "description": "A spoken answer in Voice Tutor was graded and saved, with its verdict.",
+      "privacy": {
+        "contains_pii": false,
+        "purpose": "product_analytics"
+      },
+      "properties_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "verdict"
+        ],
+        "properties": {
+          "verdict": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "project.voice_session_completed": {
+      "event_schema_version": 1,
+      "description": "A Voice Tutor session ended, with how many answers were graded.",
+      "privacy": {
+        "contains_pii": false,
+        "purpose": "product_analytics"
+      },
+      "properties_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "answers_count",
+          "finalized"
+        ],
+        "properties": {
+          "answers_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "finalized": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "project.voice_session_started": {
+      "event_schema_version": 1,
+      "description": "A Voice Tutor session connected and the learner can start talking.",
+      "privacy": {
+        "contains_pii": false,
+        "purpose": "product_analytics"
+      },
+      "properties_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  }
+}

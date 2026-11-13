@@ -30,6 +30,7 @@ function Page() {
   const [saved, setSaved] = useState<Saved[]>([]);
   const [thinking, setThinking] = useState(false);
   const lastRole = useRef<Line["role"] | null>(null);
+  const answerCount = useRef(0);
 
   const onEvent = useCallback(
     (e: LiveEvent) => {
@@ -47,11 +48,20 @@ function Page() {
           return [...prev, { role, text: delta }];
         });
         if (role === "tutor") setThinking(false);
+      } else if (e.type === "app.connected") {
+        window.__lovableEvents?.track?.("project.voice_session_started", {});
+      } else if (e.type === "app.closed") {
+        window.__lovableEvents?.track?.("project.voice_session_completed", {
+          answers_count: answerCount.current,
+          finalized: e.finalized === true,
+        });
       } else if (e.type === "app.delegation.pending") {
         setThinking(true);
       } else if (e.type === "app.voice.saved") {
         const s = e["saved"] as Saved;
         setSaved((prev) => [s, ...prev]);
+        answerCount.current += 1;
+        window.__lovableEvents?.track?.("project.voice_answer_graded", { verdict: String(s.verdict) });
         void qc.invalidateQueries();
       }
     },
@@ -66,6 +76,7 @@ function Page() {
     setLines([]);
     setSaved([]);
     lastRole.current = null;
+    answerCount.current = 0;
     call.start();
   };
 
