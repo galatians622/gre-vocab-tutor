@@ -25,7 +25,7 @@ export function WordParts({ parts, compact = false }: { parts: PartView[]; compa
           params={{ slug: p.root.slug }}
           className={cn(
             "group rounded-xl border-l-4 px-3 py-2 transition-shadow hover:shadow-[var(--shadow-soft)]",
-            KIND_STYLE[p.root.kind] ?? KIND_STYLE.root,
+            KIND_STYLE[p.root.kind] ?? KIND_STYLE["root"],
             compact && "px-2.5 py-1.5",
           )}
         >
