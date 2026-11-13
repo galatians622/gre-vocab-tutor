@@ -13,12 +13,12 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
-import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
 import { Route as AuthenticatedOnboardingRouteImport } from './routes/_authenticated/onboarding'
 import { Route as AuthenticatedProgressRouteImport } from './routes/_authenticated/progress'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedStudyRouteImport } from './routes/_authenticated/study'
 import { Route as AuthenticatedVoiceRouteImport } from './routes/_authenticated/voice'
+import { Route as AuthenticatedLibraryIndexRouteImport } from './routes/_authenticated/library.index'
 import { Route as AuthenticatedRootsIndexRouteImport } from './routes/_authenticated/roots.index'
 import { Route as AuthenticatedRootsSlugRouteImport } from './routes/_authenticated/roots.$slug'
 
@@ -39,11 +39,6 @@ const AuthRoute = AuthRouteImport.update({
 const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedLibraryRoute = AuthenticatedLibraryRouteImport.update({
-  id: '/library',
-  path: '/library',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedOnboardingRoute = AuthenticatedOnboardingRouteImport.update({
@@ -71,6 +66,12 @@ const AuthenticatedVoiceRoute = AuthenticatedVoiceRouteImport.update({
   path: '/voice',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedLibraryIndexRoute =
+  AuthenticatedLibraryIndexRouteImport.update({
+    id: '/library/',
+    path: '/library/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedRootsIndexRoute = AuthenticatedRootsIndexRouteImport.update({
   id: '/roots/',
   path: '/roots/',
@@ -86,26 +87,26 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
-  '/library': typeof AuthenticatedLibraryRoute
   '/onboarding': typeof AuthenticatedOnboardingRoute
   '/progress': typeof AuthenticatedProgressRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/study': typeof AuthenticatedStudyRoute
   '/voice': typeof AuthenticatedVoiceRoute
   '/roots/$slug': typeof AuthenticatedRootsSlugRoute
+  '/library/': typeof AuthenticatedLibraryIndexRoute
   '/roots/': typeof AuthenticatedRootsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
-  '/library': typeof AuthenticatedLibraryRoute
   '/onboarding': typeof AuthenticatedOnboardingRoute
   '/progress': typeof AuthenticatedProgressRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/study': typeof AuthenticatedStudyRoute
   '/voice': typeof AuthenticatedVoiceRoute
   '/roots/$slug': typeof AuthenticatedRootsSlugRoute
+  '/library': typeof AuthenticatedLibraryIndexRoute
   '/roots': typeof AuthenticatedRootsIndexRoute
 }
 export interface FileRoutesById {
@@ -114,13 +115,13 @@ export interface FileRoutesById {
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/auth': typeof AuthRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
-  '/_authenticated/library': typeof AuthenticatedLibraryRoute
   '/_authenticated/onboarding': typeof AuthenticatedOnboardingRoute
   '/_authenticated/progress': typeof AuthenticatedProgressRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/study': typeof AuthenticatedStudyRoute
   '/_authenticated/voice': typeof AuthenticatedVoiceRoute
   '/_authenticated/roots/$slug': typeof AuthenticatedRootsSlugRoute
+  '/_authenticated/library/': typeof AuthenticatedLibraryIndexRoute
   '/_authenticated/roots/': typeof AuthenticatedRootsIndexRoute
 }
 export interface FileRouteTypes {
@@ -129,26 +130,26 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
-    | '/library'
     | '/onboarding'
     | '/progress'
     | '/settings'
     | '/study'
     | '/voice'
     | '/roots/$slug'
+    | '/library/'
     | '/roots/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/auth'
     | '/dashboard'
-    | '/library'
     | '/onboarding'
     | '/progress'
     | '/settings'
     | '/study'
     | '/voice'
     | '/roots/$slug'
+    | '/library'
     | '/roots'
   id:
     | '__root__'
@@ -156,13 +157,13 @@ export interface FileRouteTypes {
     | '/_authenticated'
     | '/auth'
     | '/_authenticated/dashboard'
-    | '/_authenticated/library'
     | '/_authenticated/onboarding'
     | '/_authenticated/progress'
     | '/_authenticated/settings'
     | '/_authenticated/study'
     | '/_authenticated/voice'
     | '/_authenticated/roots/$slug'
+    | '/_authenticated/library/'
     | '/_authenticated/roots/'
   fileRoutesById: FileRoutesById
 }
@@ -202,13 +203,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDashboardRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/library': {
-      id: '/_authenticated/library'
-      path: '/library'
-      fullPath: '/library'
-      preLoaderRoute: typeof AuthenticatedLibraryRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/onboarding': {
       id: '/_authenticated/onboarding'
       path: '/onboarding'
@@ -244,6 +238,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedVoiceRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/library/': {
+      id: '/_authenticated/library/'
+      path: '/library'
+      fullPath: '/library/'
+      preLoaderRoute: typeof AuthenticatedLibraryIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/roots/': {
       id: '/_authenticated/roots/'
       path: '/roots'
@@ -263,25 +264,25 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
-  AuthenticatedLibraryRoute: typeof AuthenticatedLibraryRoute
   AuthenticatedOnboardingRoute: typeof AuthenticatedOnboardingRoute
   AuthenticatedProgressRoute: typeof AuthenticatedProgressRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedStudyRoute: typeof AuthenticatedStudyRoute
   AuthenticatedVoiceRoute: typeof AuthenticatedVoiceRoute
   AuthenticatedRootsSlugRoute: typeof AuthenticatedRootsSlugRoute
+  AuthenticatedLibraryIndexRoute: typeof AuthenticatedLibraryIndexRoute
   AuthenticatedRootsIndexRoute: typeof AuthenticatedRootsIndexRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
-  AuthenticatedLibraryRoute: AuthenticatedLibraryRoute,
   AuthenticatedOnboardingRoute: AuthenticatedOnboardingRoute,
   AuthenticatedProgressRoute: AuthenticatedProgressRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedStudyRoute: AuthenticatedStudyRoute,
   AuthenticatedVoiceRoute: AuthenticatedVoiceRoute,
   AuthenticatedRootsSlugRoute: AuthenticatedRootsSlugRoute,
+  AuthenticatedLibraryIndexRoute: AuthenticatedLibraryIndexRoute,
   AuthenticatedRootsIndexRoute: AuthenticatedRootsIndexRoute,
 }
 

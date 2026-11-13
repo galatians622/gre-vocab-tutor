@@ -295,30 +295,43 @@ export const getDiagnostic = createServerFn({ method: "GET" })
     const words = await loadWordsWithParts(context.supabase);
     const { data: roots } = await context.supabase.from("roots").select("id, slug, form, meaning, kind").in("kind", ["root", "prefix"]);
     const shuffle = <T,>(a: T[]) => [...a].sort(() => Math.random() - 0.5);
-    const common = shuffle(words.filter((w) => w.gre_frequency === 3));
-    const pick = (n: number) => common.splice(0, n);
     const options = (w: (typeof words)[number]) =>
       shuffle([w, ...shuffle(words.filter((x) => x.id !== w.id && x.part_of_speech === w.part_of_speech)).slice(0, 3)]).map((x) => ({
         id: x.id,
         label: x.definition,
       }));
-    const recognition = pick(4).map((w) => ({ type: "recognition" as const, targetId: w.id, word: w.word, options: options(w) }));
-    const recall = pick(2).map((w) => ({ type: "recall" as const, targetId: w.id, word: w.word, pos: w.part_of_speech }));
-    const contextItems = pick(2).map((w) => ({
-      type: "context" as const,
-      targetId: w.id,
-      word: w.word,
-      sentence: w.examples[0] ?? "",
-      options: options(w),
-    }));
+    // Sample every difficulty band (1 = foundational, 3 = advanced), common GRE words first,
+    // so results show both how familiar the core list is and where the learner's level drops off.
+    const items: Array<
+      | { type: "recognition"; targetId: string; word: string; level: number; common: boolean; options: { id: string; label: string }[] }
+      | { type: "recall"; targetId: string; word: string; pos: string; level: number; common: boolean }
+      | { type: "context"; targetId: string; word: string; sentence: string; level: number; common: boolean; options: { id: string; label: string }[] }
+      | { type: "root"; targetId: string; form: string; level: number; common: boolean; options: { id: string; label: string }[] }
+    > = [];
+    for (const level of [1, 2, 3]) {
+      const band = shuffle(words.filter((w) => w.difficulty === level)).sort((a, b) => b.gre_frequency - a.gre_frequency);
+      const common = band.filter((w) => w.gre_frequency >= 2);
+      const pool = [...shuffle(common.slice(0, 20)), ...band.filter((w) => w.gre_frequency < 2)];
+      const take = (n: number) => pool.splice(0, n);
+      for (const w of take(4)) items.push({ type: "recognition", targetId: w.id, word: w.word, level, common: w.gre_frequency >= 2, options: options(w) });
+      for (const w of take(1)) items.push({ type: "recall", targetId: w.id, word: w.word, pos: w.part_of_speech, level, common: w.gre_frequency >= 2 });
+      for (const w of take(1).filter((x) => x.examples[0]))
+        items.push({ type: "context", targetId: w.id, word: w.word, sentence: w.examples[0]!, level, common: w.gre_frequency >= 2, options: options(w) });
+    }
     const rootPool = shuffle(roots ?? []);
-    const rootItems = rootPool.slice(0, 3).map((r) => ({
-      type: "root" as const,
-      targetId: r.id,
-      form: r.form,
-      options: shuffle([r, ...rootPool.filter((x) => x.id !== r.id).slice(0, 3)]).map((x) => ({ id: x.id, label: x.meaning })),
-    }));
-    return [...recognition.slice(0, 2), rootItems[0], ...recall.slice(0, 1), contextItems[0], ...recognition.slice(2), rootItems[1], ...recall.slice(1), contextItems[1], rootItems[2]].filter((x): x is NonNullable<typeof x> => Boolean(x));
+    for (const r of rootPool.slice(0, 3))
+      items.push({
+        type: "root",
+        targetId: r.id,
+        form: r.form,
+        level: 0,
+        common: true,
+        options: shuffle([r, ...rootPool.filter((x) => x.id !== r.id).slice(0, 3)]).map((x) => ({ id: x.id, label: x.meaning })),
+      });
+    // Easiest band first so the learner warms up; roots interleaved.
+    const words1 = items.filter((i) => i.type !== "root");
+    const r = items.filter((i) => i.type === "root");
+    return [...words1.slice(0, 6), r[0], ...words1.slice(6, 12), r[1], ...words1.slice(12), r[2]].filter((x): x is NonNullable<typeof x> => Boolean(x));
   });
 
 // ---------- dashboard & progress ----------

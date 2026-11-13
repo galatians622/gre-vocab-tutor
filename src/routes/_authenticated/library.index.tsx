@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { PageHeader } from "@/components/app/app-shell";
 
-export const Route = createFileRoute("/_authenticated/library")({
+export const Route = createFileRoute("/_authenticated/library/")({
   head: () => ({
     meta: [
       { title: "Word library — LexiMind GRE" },
