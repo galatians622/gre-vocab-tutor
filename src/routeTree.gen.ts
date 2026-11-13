@@ -19,6 +19,7 @@ import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedStudyRouteImport } from './routes/_authenticated/study'
 import { Route as AuthenticatedVoiceRouteImport } from './routes/_authenticated/voice'
 import { Route as AuthenticatedLibraryIndexRouteImport } from './routes/_authenticated/library.index'
+import { Route as AuthenticatedLibrarySlugRouteImport } from './routes/_authenticated/library.$slug'
 import { Route as AuthenticatedRootsIndexRouteImport } from './routes/_authenticated/roots.index'
 import { Route as AuthenticatedRootsSlugRouteImport } from './routes/_authenticated/roots.$slug'
 
@@ -72,6 +73,12 @@ const AuthenticatedLibraryIndexRoute =
     path: '/library/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedLibrarySlugRoute =
+  AuthenticatedLibrarySlugRouteImport.update({
+    id: '/library/$slug',
+    path: '/library/$slug',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedRootsIndexRoute = AuthenticatedRootsIndexRouteImport.update({
   id: '/roots/',
   path: '/roots/',
@@ -92,6 +99,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AuthenticatedSettingsRoute
   '/study': typeof AuthenticatedStudyRoute
   '/voice': typeof AuthenticatedVoiceRoute
+  '/library/$slug': typeof AuthenticatedLibrarySlugRoute
   '/roots/$slug': typeof AuthenticatedRootsSlugRoute
   '/library/': typeof AuthenticatedLibraryIndexRoute
   '/roots/': typeof AuthenticatedRootsIndexRoute
@@ -105,6 +113,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/study': typeof AuthenticatedStudyRoute
   '/voice': typeof AuthenticatedVoiceRoute
+  '/library/$slug': typeof AuthenticatedLibrarySlugRoute
   '/roots/$slug': typeof AuthenticatedRootsSlugRoute
   '/library': typeof AuthenticatedLibraryIndexRoute
   '/roots': typeof AuthenticatedRootsIndexRoute
@@ -120,6 +129,7 @@ export interface FileRoutesById {
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/study': typeof AuthenticatedStudyRoute
   '/_authenticated/voice': typeof AuthenticatedVoiceRoute
+  '/_authenticated/library/$slug': typeof AuthenticatedLibrarySlugRoute
   '/_authenticated/roots/$slug': typeof AuthenticatedRootsSlugRoute
   '/_authenticated/library/': typeof AuthenticatedLibraryIndexRoute
   '/_authenticated/roots/': typeof AuthenticatedRootsIndexRoute
@@ -135,6 +145,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/study'
     | '/voice'
+    | '/library/$slug'
     | '/roots/$slug'
     | '/library/'
     | '/roots/'
@@ -148,6 +159,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/study'
     | '/voice'
+    | '/library/$slug'
     | '/roots/$slug'
     | '/library'
     | '/roots'
@@ -162,6 +174,7 @@ export interface FileRouteTypes {
     | '/_authenticated/settings'
     | '/_authenticated/study'
     | '/_authenticated/voice'
+    | '/_authenticated/library/$slug'
     | '/_authenticated/roots/$slug'
     | '/_authenticated/library/'
     | '/_authenticated/roots/'
@@ -245,6 +258,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedLibraryIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/library/$slug': {
+      id: '/_authenticated/library/$slug'
+      path: '/library/$slug'
+      fullPath: '/library/$slug'
+      preLoaderRoute: typeof AuthenticatedLibrarySlugRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/roots/': {
       id: '/_authenticated/roots/'
       path: '/roots'
@@ -269,6 +289,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedStudyRoute: typeof AuthenticatedStudyRoute
   AuthenticatedVoiceRoute: typeof AuthenticatedVoiceRoute
+  AuthenticatedLibrarySlugRoute: typeof AuthenticatedLibrarySlugRoute
   AuthenticatedRootsSlugRoute: typeof AuthenticatedRootsSlugRoute
   AuthenticatedLibraryIndexRoute: typeof AuthenticatedLibraryIndexRoute
   AuthenticatedRootsIndexRoute: typeof AuthenticatedRootsIndexRoute
@@ -281,6 +302,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedStudyRoute: AuthenticatedStudyRoute,
   AuthenticatedVoiceRoute: AuthenticatedVoiceRoute,
+  AuthenticatedLibrarySlugRoute: AuthenticatedLibrarySlugRoute,
   AuthenticatedRootsSlugRoute: AuthenticatedRootsSlugRoute,
   AuthenticatedLibraryIndexRoute: AuthenticatedLibraryIndexRoute,
   AuthenticatedRootsIndexRoute: AuthenticatedRootsIndexRoute,

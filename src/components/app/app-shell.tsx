@@ -105,7 +105,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 className={cn("flex w-16 flex-col items-center gap-1 py-1.5 text-[11px] font-medium", active ? "text-primary" : "text-muted-foreground")}
               >
                 <Icon className="h-5 w-5" />
-                {label.split(" ")[label.split(" ").length > 1 && to !== "/library" ? 0 : 0]}
+                {to === "/library" ? "Words" : to === "/roots" ? "Roots" : label}
               </Link>
             );
           })}

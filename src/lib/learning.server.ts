@@ -254,10 +254,11 @@ export async function buildQueue(
   const [words, states, prefsRes, learnedToday] = await Promise.all([
     loadWordsWithParts(db),
     loadStates(db, userId),
-    db.from("user_preferences").select("daily_new_words").eq("user_id", userId).maybeSingle(),
+    db.from("user_preferences").select("daily_new_words, target_level").eq("user_id", userId).maybeSingle(),
     introducedToday(db, userId),
   ]);
   const dailyGoal = prefsRes.data?.daily_new_words ?? 10;
+  const startBand = ({ foundational: 1, intermediate: 2, advanced: 3 } as Record<string, number>)[prefsRes.data?.target_level ?? ""] ?? 1;
   const grouped = groupStates(states, "word");
   const now = Date.now();
   const total = itemsForMinutes(opts.minutes);
@@ -282,7 +283,14 @@ export async function buildQueue(
   const allowance = newWordAllowance({ dailyGoal, introducedToday: learnedToday, dueReviews: due.length });
   const fresh = words
     .filter((w) => !grouped.has(w.id) && diffOk(w))
-    .sort((a, b) => b.gre_frequency - a.gre_frequency || a.difficulty - b.difficulty || a.word.localeCompare(b.word));
+    // Placement test sets the starting band; nearest band first, common GRE words first within it.
+    .sort(
+      (a, b) =>
+        Math.abs(a.difficulty - startBand) - Math.abs(b.difficulty - startBand) ||
+        b.gre_frequency - a.gre_frequency ||
+        a.difficulty - b.difficulty ||
+        a.word.localeCompare(b.word),
+    );
 
   const items: QueueItem[] = [];
   const used = new Set<string>();
