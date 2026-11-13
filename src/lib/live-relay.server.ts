@@ -140,7 +140,7 @@ Backend tools: Get the next word in the learner's 10-word set with its verified 
 Delegate to the backend when: You need the next word, or the learner has finished a word (definition, origin explanation and their sentence) and it must be graded,
 or the learner corrects an answer the backend is grading.
 Do not delegate to the backend when: Greeting, giving a hint, clarifying, or repeating feedback already given.
-Never invent definitions or etymologies; use the backend's verified data. Wait for the backend result before announcing a grade.`;
+Never invent definitions or etymologies; use the backend's verified data. Every word has a verified definition in the backend result — never tell the learner a definition is unavailable. If you don't have it yet, delegate to the backend for it. Wait for the backend result before announcing a grade.`;
 
 function isListeningSound(text: string) {
   const normalized = text.toLowerCase().replace(/[\s\p{Pd}]/gu, "");
@@ -210,7 +210,8 @@ async function answerQuestion(
       "and once for the origin explanation (skill root_recognition) when they explained it. Hinted answers count as hints_used 1. " +
       "Also judge the learner's own sentence (put that feedback in the recall feedback). The recall verdict is 'correct' only if the definition was right. " +
       "After record_answer, call next_word in the same turn. " +
-      "Then reply in at most 90 words: the grade (praise only if correct), a short correction, the verified definition with its example sentence, feedback on their sentence, " +
+      "Your reply is the tutor's ONLY source of facts, so always copy the verified definition and example sentence word-for-word into it (for the graded word and for the next word). Every word in this app has a verified definition; never say one is missing. " +
+      "Then reply in at most 110 words: the grade (praise only if correct), a short correction, the verified definition with its example sentence, feedback on their sentence, " +
       "the set progress, and the next word to ask. Be fast: no extra tool calls. Use only verified data from tools.",
     messages,
     tools: {
@@ -289,7 +290,11 @@ async function answerQuestion(
             if (r) progress = { word_mastered: isMastered(r), correct_answers_still_needed: remaining(r), set_mastered: setComplete(learner.set) };
           }
           if (args.skill === "recall") onSaved({ word: word.word, verdict: args.verdict, feedback: args.feedback });
-          return { saved: true, progress };
+          return {
+            saved: true,
+            progress,
+            verified_reference: { word: word.word, definition: word.definition, example_sentence: word.examples?.[0] ?? null, etymology: word.etymology },
+          };
         },
       }),
     },
