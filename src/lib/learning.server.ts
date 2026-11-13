@@ -158,7 +158,7 @@ export async function applyReview(db: DB, userId: string, input: ReviewInput) {
   const grade =
     input.skill === "precision"
       ? precisionGrade(verdict, hints)
-      : gradeForAttempt({ verdict, hintsUsed: hints, confidence: input.confidence });
+      : gradeForAttempt({ verdict, hintsUsed: hints, confidence: input.confidence ?? null });
   const next = scheduleReview(existing, grade, now);
   const independent = isIndependentCorrect(verdict, hints) || (input.skill === "precision" && grade >= 3);
   const today = dayKey(now);
@@ -239,7 +239,7 @@ function chooseReviewTask(word: WordWithParts, states: StateRow[], focus: StudyF
   ];
   if (word.parts.some((p) => p.root.kind !== "suffix")) formats.push({ task: "deconstruct", skill: "root_recognition" });
   formats.sort((a, b) => (by(a.skill)?.independent_correct ?? 0) - (by(b.skill)?.independent_correct ?? 0));
-  return formats[0].task;
+  return formats[0]!.task;
 }
 
 function isWeak(states: StateRow[]) {
@@ -338,4 +338,72 @@ export async function buildQueue(
     items: items.slice(0, Math.max(total, newWords.length * 2)),
     stats: { due: due.length, weak: weak.length, allowance, dailyGoal, learnedToday },
   };
+}
+
+// ---------- references for grading ----------
+
+export function wordReference(w: WordWithParts) {
+  const lines = [
+    `Word: ${w.word} (${w.part_of_speech})`,
+    `Primary definition: ${w.definition}`,
+  ];
+  if (w.secondary_meanings.length) lines.push(`Secondary meanings: ${w.secondary_meanings.join("; ")}`);
+  lines.push(`Plain English: ${w.plain_english}`);
+  if (w.synonyms.length) lines.push(`Synonyms: ${w.synonyms.join(", ")}`);
+  if (w.confused_note) lines.push(`Commonly confused: ${w.confused_note}`);
+  if (w.etymology) lines.push(`Etymology (${w.etymology_status}): ${w.etymology}`);
+  if (w.parts.length) {
+    lines.push(
+      "Word parts: " +
+        w.parts.map((p) => `${p.surface} = ${p.root.form} (${p.root.kind}, ${p.root.origin}) "${p.root.meaning}" — ${p.contribution}`).join(" | "),
+    );
+  }
+  return lines.join("\n");
+}
+
+// ---------- root summaries ----------
+
+export type RootSummary = {
+  root: RootRow;
+  familyIds: string[];
+  level: MasteryLevel;
+  wordsExplained: number;
+  attempts: number;
+  correct: number;
+  target: number;
+};
+
+export async function computeRootSummaries(db: DB, userId: string, preloaded?: { words: WordWithParts[]; states: StateRow[] }) {
+  const [rootsRes, words, states] = await Promise.all([
+    db.from("roots").select("*").order("slug"),
+    preloaded ? Promise.resolve(preloaded.words) : loadWordsWithParts(db),
+    preloaded ? Promise.resolve(preloaded.states) : loadStates(db, userId),
+  ]);
+  const roots = must(rootsRes, "roots");
+  const wordStates = groupStates(states, "word");
+  const rootStates = groupStates(states, "root");
+  const { rootFamilyTarget } = await import("./mastery");
+  return roots.map((root): RootSummary => {
+    const family = words.filter((w) => w.parts.some((p) => p.root.id === root.id));
+    let wordsExplained = 0;
+    let attempts = 0;
+    let correct = 0;
+    for (const w of family) {
+      const s = wordStates.get(w.id)?.find((x) => x.skill === "root_recognition");
+      if (!s) continue;
+      if (s.independent_correct > 0) wordsExplained++;
+      attempts += s.correct_count + s.incorrect_count;
+      correct += s.correct_count;
+    }
+    const evidence = { familySize: family.length, wordsExplained, attempts, correct };
+    return {
+      root,
+      familyIds: family.map((w) => w.id),
+      level: rootMasteryLevel(rootStates.get(root.id) ?? [], evidence),
+      wordsExplained,
+      attempts,
+      correct,
+      target: rootFamilyTarget(family.length),
+    };
+  });
 }

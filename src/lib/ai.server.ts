@@ -91,3 +91,64 @@ export async function gradeWithAi(input: {
     throw friendlyError(error);
   }
 }
+
+const familySchema = z.object({
+  definition_verdict: z.enum(["correct", "partial", "incorrect"]),
+  explanation_verdict: z.enum(["correct", "partial", "incorrect"]),
+  feedback: z.string(),
+  misconception: z.string().nullable(),
+});
+export type AiFamilyGrade = z.infer<typeof familySchema>;
+
+/**
+ * Grades a root-family attempt: the learner defines the word on their own and explains its
+ * origin and how the root, prefix and suffix produce the meaning.
+ */
+export async function gradeFamilyWithAi(input: {
+  word: string;
+  reference: string;
+  definitionAnswer: string;
+  explanationAnswer: string;
+}): Promise<AiFamilyGrade> {
+  const instructions = [
+    "You grade a GRE vocabulary learner in a root-family drill. The REFERENCE is authoritative; judge meaning, not spelling.",
+    "Two separate verdicts:",
+    "definition_verdict — correct: precise enough to distinguish from near-synonyms; partial: right direction but vague or missing a key nuance; incorrect: wrong.",
+    "explanation_verdict — correct: names the root's meaning, mentions the relevant prefix/suffix where the reference lists one, and plausibly connects them to the definition (it may be informal); partial: names the root but does not connect it to the meaning, or misreads a part; incorrect: wrong or missing.",
+    "Accept honest historical nuance: if the reference marks a link as indirect or uncertain, do not demand a neat breakdown.",
+    "feedback: 2-3 short sentences to the learner: what was right, what was missing, and the correct connection when needed. Use only facts from the REFERENCE; never invent etymology.",
+    "misconception: a short label for the specific confusion, or null.",
+  ].join("\n");
+  try {
+    const result = streamText({
+      model: provider().responses(TEXT_MODEL),
+      instructions,
+      messages: [
+        {
+          role: "user",
+          content: `WORD: ${input.word}\n\nREFERENCE:\n${input.reference}\n\nLEARNER DEFINITION: """${input.definitionAnswer.slice(0, 500)}"""\nLEARNER EXPLANATION OF ORIGIN: """${input.explanationAnswer.slice(0, 800)}"""`,
+        },
+      ],
+      output: Output.object({ schema: familySchema }),
+      maxRetries: 1,
+      providerOptions: {
+        openai: {
+          store: false,
+          forceReasoning: true,
+          reasoningEffort: "low",
+          reasoningSummary: "auto",
+          include: ["reasoning.encrypted_content"],
+        },
+      },
+    });
+    for await (const _ of result.fullStream) {
+      // drain to completion
+    }
+    return familySchema.parse(await result.output);
+  } catch (error) {
+    if (NoObjectGeneratedError.isInstance(error)) throw new AiUnavailableError("The grader returned an unreadable answer.");
+    if (error instanceof AiUnavailableError) throw error;
+    console.error("AI family grading failed", error);
+    throw friendlyError(error);
+  }
+}

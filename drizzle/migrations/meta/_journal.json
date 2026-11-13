@@ -15,6 +15,20 @@
       "when": 1794566794492,
       "tag": "0001_seed_vocabulary",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794567646975,
+      "tag": "0002_expand_root_families_part1",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794567781944,
+      "tag": "0003_expand_root_families_part2",
+      "breakpoints": true
     }
   ]
 }
