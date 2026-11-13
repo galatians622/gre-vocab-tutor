@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1794566363308,
+      "tag": "0000_leximind_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794566794492,
+      "tag": "0001_seed_vocabulary",
+      "breakpoints": true
+    }
+  ]
+}
