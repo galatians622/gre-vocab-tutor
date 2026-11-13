@@ -28,3 +28,4 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+- Voice tutor: browser → /api/live WebSocket (src/lib/live-relay.server.ts, dispatched in src/server.ts and live-vite-plugin.ts in dev) → AI Gateway Live; the browser sends its access token in app.start and the relay saves answers as that learner — the WebSocket can't carry auth headers.
