@@ -29,6 +29,13 @@
       "when": 1794567781944,
       "tag": "0003_expand_root_families_part2",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794573831083,
+      "tag": "0004_add_advanced_words",
+      "breakpoints": true
     }
   ]
 }
