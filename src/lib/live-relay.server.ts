@@ -4,8 +4,9 @@ import process from "node:process";
 import { z } from "zod";
 import { applyReview, buildQueue, loadWordsWithParts } from "./learning.server";
 import { userClientFromToken, type DB } from "./supabase-user.server";
+import { SET_SIZE, newSet, nextWord, recordResult, remaining, setComplete, isMastered, type VoiceSet } from "./voice-set";
 
-type Learner = { db: DB; userId: string; recorded: Set<string> };
+type Learner = { db: DB; userId: string; recorded: Set<string>; set?: VoiceSet; done: Set<string> };
 type SavedAttempt = { word: string; verdict: string; feedback: string };
 
 export type LiveConfig = {
@@ -22,7 +23,7 @@ const liveSettings = {
   liveModel: "openai/gpt-live-1",
   backendModel: "openai/gpt-6-astra",
   openingInstructions:
-    "Greet the learner briefly as their GRE vocabulary tutor, say you will pick words for them, then get today's practice words from the backend and ask about the first one.",
+    "Greet the learner briefly as their GRE vocabulary tutor, say you'll work through a set of 10 words until each one sticks, then get the first word from the backend and ask about it.",
 };
 
 export type LiveSocket = {
@@ -122,17 +123,21 @@ export function handleLiveRequest(request: Request): Response {
   return new Response(null, response);
 }
 
-const conversationInstructions = `You are Lexi, a warm, encouraging GRE vocabulary tutor speaking English.
-Keep replies short and spoken-friendly. Quiz one word at a time.
-For each word: ask the learner to define it in their own words. Then ask them to explain the word's origin:
-which root, prefix or suffix it contains and how those parts build the meaning.
+const conversationInstructions = `You are Lexi, a calm, focused GRE vocabulary tutor speaking English.
+Keep replies short and spoken-friendly. Quiz one word at a time, always the word the backend gives you.
+For each word: 1) ask the learner to define it in their own words; 2) ask how its root, prefix or suffix build the meaning;
+3) ask them to use the word in their own sentence.
 Never say the definition before the learner tries. If they are stuck, give one small hint (for example the root's meaning) and let them try again.
-After they answer, give brief, honest feedback and the correct meaning, then move to the next word.
-Backchannel policy: Use moderate listening sounds without taking over.
+Acknowledgements: while the learner is answering or before the backend has graded, respond ONLY with a neutral word like "Okay", "Got it" or "Mm-hm".
+Never say "good", "great", "right", "nice" or "wrong" until the backend returns the grade; then praise only if it was correct, and say clearly what was missing if it was partial or incorrect.
+When you give or confirm a definition, always also read the example sentence from the backend so the learner hears the word in context.
+Give brief feedback on the learner's own sentence: whether it uses the word correctly, and a better version if not.
+Words come in sets of 10. The learner cannot move to a new set until the backend says the set is mastered; words they missed come back several times. If they ask to skip ahead, explain that briefly and continue.
+Backchannel policy: Use moderate neutral listening sounds without taking over.
 Interruption policy: Stop your answer and listen when the learner interrupts.
 Delegation policy:
-Backend tools: Fetch the learner's practice words with their verified definitions and word parts, and grade and save each answer to their progress.
-Delegate to the backend when: You need the next practice words, or the learner has finished answering a word (definition and origin explanation) and it must be graded and saved,
+Backend tools: Get the next word in the learner's 10-word set with its verified definition, example sentence and word parts; grade and save each answer.
+Delegate to the backend when: You need the next word, or the learner has finished a word (definition, origin explanation and their sentence) and it must be graded,
 or the learner corrects an answer the backend is grading.
 Do not delegate to the backend when: Greeting, giving a hint, clarifying, or repeating feedback already given.
 Never invent definitions or etymologies; use the backend's verified data. Wait for the backend result before announcing a grade.`;
@@ -189,7 +194,7 @@ async function answerQuestion(
         ...(config.backendModel !== "openai/chat-latest"
           ? {
               forceReasoning: true,
-              reasoningEffort: "medium",
+              reasoningEffort: "low",
               reasoningSummary: "auto",
               include: ["reasoning.encrypted_content"],
             }
@@ -199,30 +204,52 @@ async function answerQuestion(
     system:
       "You are the backend for a spoken GRE vocabulary tutor. Transcripts may be incomplete or corrected; use the latest correction. " +
       "Continue from completed tool results; never record the same answer twice. " +
-      "When the tutor needs words, call get_practice_words and reply with the next word to quiz plus its verified definition and word parts for the tutor's eyes. " +
+      "When the tutor needs a word, call next_word and reply with that word plus its verified definition, example sentence and word parts for the tutor's eyes. " +
       "When the learner has answered a word, grade it strictly against the verified reference: the definition must capture the core meaning, " +
       "and the origin explanation must name the right root or affix and connect it to the meaning. Call record_answer once for the definition (skill recall) " +
       "and once for the origin explanation (skill root_recognition) when they explained it. Hinted answers count as hints_used 1. " +
-      "Then reply in at most 80 words with the grade, a short spoken-friendly correction, and the next word to ask. Use only verified data from tools.",
+      "Also judge the learner's own sentence (put that feedback in the recall feedback). The recall verdict is 'correct' only if the definition was right. " +
+      "After record_answer, call next_word in the same turn. " +
+      "Then reply in at most 90 words: the grade (praise only if correct), a short correction, the verified definition with its example sentence, feedback on their sentence, " +
+      "the set progress, and the next word to ask. Be fast: no extra tool calls. Use only verified data from tools.",
     messages,
     tools: {
-      get_practice_words: tool({
-        description: "Get the learner's next practice words (due reviews first, then new common GRE words) with verified definitions, etymology and word parts.",
-        inputSchema: z.object({ count: z.number().int().min(1).max(10) }).strict(),
-        execute: async ({ count }) => {
+      next_word: tool({
+        description:
+          "Get the next word to quiz from the learner's current 10-word set. Missed words come back until mastered; a new set only starts when every word is mastered.",
+        inputSchema: z.object({}).strict(),
+        execute: async () => {
           signal.throwIfAborted();
-          const { items } = await buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 10 });
-          const seen = new Set<string>();
-          const words = items.map((i) => i.word).filter((w) => (seen.has(w.id) ? false : (seen.add(w.id), true))).slice(0, count);
-          return words.map((w) => ({
+          const all = await loadWordsWithParts(learner.db);
+          let newSetStarted = false;
+          if (!learner.set || setComplete(learner.set)) {
+            learner.set?.words.forEach((w) => learner.done.add(w.slug));
+            const { items } = await buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 30 });
+            const slugs: string[] = [];
+            for (const i of items) if (!learner.done.has(i.word.slug) && !slugs.includes(i.word.slug)) slugs.push(i.word.slug);
+            for (const w of all) if (slugs.length < SET_SIZE && !learner.done.has(w.slug) && !slugs.includes(w.slug)) slugs.push(w.slug);
+            learner.set = newSet(slugs, (learner.set?.setNumber ?? 0) + 1);
+            newSetStarted = true;
+          }
+          const pick = nextWord(learner.set);
+          if (!pick) return { error: "No words available" };
+          const w = all.find((x) => x.slug === pick.slug)!;
+          const set = learner.set;
+          return {
+            set_number: set.setNumber,
+            new_set_started: newSetStarted,
+            words_mastered_in_set: set.words.filter(isMastered).length,
+            set_size: set.words.length,
+            this_word: { times_asked: pick.asks, correct_answers_still_needed: remaining(pick) },
             slug: w.slug,
             word: w.word,
             part_of_speech: w.part_of_speech,
             definition: w.definition,
             plain_english: w.plain_english,
+            example_sentence: w.examples?.[0] ?? null,
             etymology: w.etymology,
-            parts: w.parts.map((p) => ({ part: p.surface, kind: p.root.kind, meaning: p.root.meaning, origin: p.root.origin, contribution: p.contribution })),
-          }));
+            parts: w.parts.map((p) => ({ part: p.surface, kind: p.root.kind, meaning: p.root.meaning, contribution: p.contribution })),
+          };
         },
       }),
       record_answer: tool({
@@ -256,8 +283,13 @@ async function answerQuestion(
             source: "voice",
           });
           learner.recorded.add(key);
-          onSaved({ word: word.word, verdict: args.verdict, feedback: args.feedback });
-          return { saved: true };
+          let progress: object | undefined;
+          if (args.skill === "recall" && learner.set) {
+            const r = recordResult(learner.set, args.word_slug, args.verdict, args.hints_used);
+            if (r) progress = { word_mastered: isMastered(r), correct_answers_still_needed: remaining(r), set_mastered: setComplete(learner.set) };
+          }
+          if (args.skill === "recall") onSaved({ word: word.word, verdict: args.verdict, feedback: args.feedback });
+          return { saved: true, progress };
         },
       }),
     },
@@ -606,7 +638,7 @@ export function bindLiveConnection(
   async function startSession(sdp: string, token: unknown) {
     if (closing || browser.readyState !== 1) return;
     const auth = typeof token === "string" ? await userClientFromToken(token) : null;
-    learner = auth ? { ...auth, recorded: new Set<string>() } : undefined;
+    learner = auth ? { ...auth, recorded: new Set<string>(), done: new Set<string>() } : undefined;
     if (!learner) throw new Error("Please sign in again to use the voice tutor.");
     if (closing || browser.readyState !== 1) return;
     clearTimeout(startTimer);

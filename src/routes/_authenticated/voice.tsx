@@ -85,8 +85,9 @@ function Page() {
       <PageHeader eyebrow="Practice out loud" title="Voice Tutor" />
       <div className="surface space-y-4 p-6">
         <p className="text-sm text-muted-foreground">
-          Lexi picks your practice words, asks you to define each one, then asks how its root, prefix and suffix build the meaning.
-          Every answer is graded and saved to your progress.
+          Lexi works through sets of 10 words. For each one you define it, explain how its root, prefix and suffix build the meaning,
+          and use it in a sentence. Words you get right the first time are checked once more; missed words come back until you get them right
+          three times in a row. A new set starts only once every word is mastered.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {!active ? (
