@@ -10,4 +10,4 @@
 - [x] Expand vocabulary so each major root has up to 15+ family words, linked to prefixes and suffixes
 - [x] Placement test across foundational/intermediate/advanced levels, common words first
 - [x] Verify end-to-end signed in; commit
-- [ ] Expand vocabulary to a comprehensive GRE list (Magoosh-scale, common + less common)
+- [x] Expand vocabulary to a comprehensive GRE list (Magoosh-scale, common + less common)
