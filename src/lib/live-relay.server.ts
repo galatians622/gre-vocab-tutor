@@ -25,6 +25,12 @@ type Learner = {
   set: VoiceSet;
   /** Words from sets the learner already finished; never reused in a new set. */
   finished: Set<string>;
+  /** This call's study_sessions row, which also stores the set so the next call resumes it. */
+  sessionId: string | null;
+  /** Word the learner was on when the last call ended. */
+  resumeSlug: string | null;
+  reviewed: number;
+  correct: number;
 };
 /** The word the tutor is working on right now. */
 type CurrentWord = { slug: string; startIndex: number; quickCheck: boolean };
@@ -203,10 +209,80 @@ function cachedWords(db: DB) {
   return wordCache.promise;
 }
 
+/** What is saved in the voice session's `summary` column so the next call resumes the same set. */
+export type SavedSet = {
+  v: 1;
+  set_number: number;
+  words: SetWord[];
+  clock: number;
+  last_slug: string | null;
+  current: string | null;
+  finished: string[];
+};
+
+export function encodeSet(learner: Pick<Learner, "set" | "finished">, current: string | null): string {
+  const saved: SavedSet = {
+    v: 1,
+    set_number: learner.set.setNumber,
+    words: learner.set.words,
+    clock: learner.set.clock,
+    last_slug: learner.set.lastSlug,
+    current,
+    finished: [...learner.finished],
+  };
+  return JSON.stringify(saved);
+}
+
+export function decodeSet(summary: string | null | undefined, known: (slug: string) => boolean) {
+  if (!summary) return null;
+  try {
+    const saved = JSON.parse(summary) as SavedSet;
+    if (saved?.v !== 1 || !Array.isArray(saved.words) || typeof saved.set_number !== "number") return null;
+    const words = saved.words
+      .filter((w) => w && typeof w.slug === "string" && known(w.slug))
+      .slice(0, SET_SIZE)
+      .map((w) => ({
+        slug: w.slug,
+        asks: Number(w.asks) || 0,
+        streak: Number(w.streak) || 0,
+        firstTryCorrect: typeof w.firstTryCorrect === "boolean" ? w.firstTryCorrect : null,
+        lastAskedAt: Number.isFinite(w.lastAskedAt) ? w.lastAskedAt : -1,
+      }));
+    const set: VoiceSet = {
+      words,
+      clock: Number(saved.clock) || 0,
+      lastSlug: typeof saved.last_slug === "string" ? saved.last_slug : null,
+      setNumber: saved.set_number,
+    };
+    const finished = new Set((Array.isArray(saved.finished) ? saved.finished : []).filter((x) => typeof x === "string"));
+    const current = typeof saved.current === "string" && words.some((w) => w.slug === saved.current) ? saved.current : null;
+    return { set, finished, current };
+  } catch {
+    return null;
+  }
+}
+
 async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner> {
-  const [all, events] = await Promise.all([
+  const [all, lastSession] = await Promise.all([
     cachedWords(auth.db),
-    selectAll(
+    auth.db
+      .from("study_sessions")
+      .select("summary")
+      .eq("user_id", auth.userId)
+      .eq("mode", "voice")
+      .not("summary", "is", null)
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  const words = new Map(all.map((w) => [w.slug, w]));
+  const saved = decodeSet(lastSession.data?.summary, (slug) => words.has(slug));
+  let learner: Learner;
+  if (saved) {
+    learner = { ...auth, words, set: saved.set, finished: saved.finished, resumeSlug: saved.current, sessionId: null, reviewed: 0, correct: 0 };
+  } else {
+    // No saved set yet (older data): rebuild it from saved voice answers.
+    const events = await selectAll(
       (a, b) =>
         auth.db
           .from("review_events")
@@ -218,19 +294,30 @@ async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner
           .order("created_at", { ascending: true })
           .range(a, b),
       "voice history",
-    ),
-  ]);
-  const words = new Map(all.map((w) => [w.slug, w]));
-  const slugById = new Map(all.map((w) => [w.id, w.slug]));
-  const verdicts = new Set<Verdict>(["correct", "partial", "incorrect", "skipped"]);
-  const answers = events.flatMap((e) => {
-    const slug = slugById.get(e.item_id);
-    const verdict = e.verdict as Verdict;
-    return slug && verdicts.has(verdict) ? [{ slug, verdict, hintsUsed: e.hints_used ?? 0 }] : [];
-  });
-  const { set, finished } = replaySets(answers);
-  const learner: Learner = { ...auth, words, set, finished };
+    );
+    const slugById = new Map(all.map((w) => [w.id, w.slug]));
+    const verdicts = new Set<Verdict>(["correct", "partial", "incorrect", "skipped"]);
+    const answers = events.flatMap((e) => {
+      const slug = slugById.get(e.item_id);
+      const verdict = e.verdict as Verdict;
+      return slug && verdicts.has(verdict) ? [{ slug, verdict, hintsUsed: e.hints_used ?? 0 }] : [];
+    });
+    const { set, finished } = replaySets(answers);
+    learner = { ...auth, words, set, finished, resumeSlug: null, sessionId: null, reviewed: 0, correct: 0 };
+  }
+  if (setComplete(learner.set)) {
+    learner.set.words.forEach((w) => learner.finished.add(w.slug));
+    learner.set = newSet([], learner.set.setNumber + 1);
+    learner.resumeSlug = null;
+  }
   await topUpSet(learner);
+  const row = await auth.db
+    .from("study_sessions")
+    .insert({ user_id: auth.userId, mode: "voice", focus: "set", summary: encodeSet(learner, learner.resumeSlug) })
+    .select("id")
+    .single();
+  if (row.error) console.error("Could not save voice session", row.error.message);
+  learner.sessionId = row.data?.id ?? null;
   return learner;
 }
 
@@ -279,11 +366,11 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
 }
 
 /** A short, natural line for the tutor to say aloud to introduce a word. */
-export function spokenIntro(word: WordWithParts, entry: SetWord, lead = "Next word") {
+export function spokenIntro(word: WordWithParts, entry: SetWord, lead = "Next word:") {
   if (entry.asks > 0) return `Quick review: ${word.word}. What does ${word.word} mean?`;
   const parts = word.parts.map((p) => `${p.surface} means "${p.root.meaning}"`);
-  if (!parts.length) return `${lead}: ${word.word}. What do you think ${word.word} means?`;
-  return `${lead}: ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
+  if (!parts.length) return `${lead} ${word.word}. What do you think ${word.word} means?`;
+  return `${lead} ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
 }
 
 function transcriptText(items: Transcript[]) {
@@ -397,6 +484,27 @@ export function bindLiveConnection(
     });
   }
 
+  let saveChain: Promise<void> = Promise.resolve();
+  /** Saves the set and current word, so the next call picks up exactly here. */
+  function saveState() {
+    const active = learner;
+    if (!active?.sessionId) return;
+    const update = {
+      summary: encodeSet(active, current?.slug ?? null),
+      ended_at: new Date().toISOString(),
+      items_reviewed: active.reviewed,
+      items_correct: active.correct,
+    };
+    const id = active.sessionId;
+    saveChain = saveChain
+      .then(async () => {
+        const { error } = await active.db.from("study_sessions").update(update).eq("id", id);
+        if (error) console.error("Could not save voice progress", error.message);
+      })
+      .catch(() => undefined);
+    execution.waitUntil(saveChain);
+  }
+
   /** Gives the tutor a word: the facts silently, then a short line to say aloud right away. */
   function sendWord(delegationID: string | null, brief: string, spoken: string, lastEventID?: string) {
     sendCommentary(delegationID, brief, undefined, "thinking");
@@ -445,6 +553,7 @@ export function bindLiveConnection(
     const word = learner!.words.get(entry.slug)!;
     current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: entry.asks > 0 };
     emitProgress();
+    saveState();
     return { brief: briefing(learner!, word, entry, note), spoken: spokenIntro(word, entry, lead) };
   }
 
@@ -545,6 +654,7 @@ export function bindLiveConnection(
         feedback: grade.feedback,
         misconception: grade.misconception,
         source: "voice",
+        sessionId: active.sessionId,
       });
       if (grade.explained_origin && grade.origin_verdict) {
         await applyReview(active.db, active.userId, {
@@ -557,9 +667,13 @@ export function bindLiveConnection(
           response: grade.learner_definition,
           feedback: grade.feedback,
           source: "voice",
+          sessionId: active.sessionId,
         });
       }
       recordResult(active.set, word.slug, verdict, hints);
+      active.reviewed += 1;
+      if (verdict === "correct" && hints === 0) active.correct += 1;
+      saveState();
       const saved: SavedAttempt = { word: entry.word, verdict: hints > 0 && verdict === "correct" ? "partial" : verdict, feedback: grade.feedback };
       emit({ type: "app.voice.saved", saved });
       emitProgress();
@@ -619,7 +733,7 @@ export function bindLiveConnection(
       if (closing) return;
       pick = nextWord(active.set);
       note = `The learner just mastered every word in set ${active.set.setNumber - 1}.`;
-      lead = `You've mastered every word in set ${active.set.setNumber - 1}! On to set ${active.set.setNumber}. First word`;
+      lead = `You've mastered every word in set ${active.set.setNumber - 1}! On to set ${active.set.setNumber}. First word:`;
     }
     if (!pick) {
       return deliver(id, "There are no more words available right now. Congratulate the learner on their progress and wrap up the session.");
@@ -656,12 +770,18 @@ export function bindLiveConnection(
       ) {
         if (greetingCommand.type === "instructions") {
           greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
-          const first = nextWord(learner!.set);
+          const resume = learner!.set.words.find((w) => w.slug === learner!.resumeSlug && w.streak < MASTERY_STREAK);
+          const first = resume ?? nextWord(learner!.set);
           if (first) {
             const resuming = learner!.set.words.some((w) => w.asks > 0);
-            const word = startWord(first, resuming ? "The learner is resuming this set from an earlier session." : undefined, "First word");
+            const done = masteredCount(learner!.set);
+            const word = startWord(
+              first,
+              resuming ? "The learner is resuming this set from an earlier session." : undefined,
+              resume ? "Let's go back to" : "First word:",
+            );
             const hello = resuming
-              ? `Welcome back! I'm Lexi. Let's pick up your set ${learner!.set.setNumber} where you left off.`
+              ? `Welcome back! Let's pick up set ${learner!.set.setNumber} right where you left off. You've mastered ${done} of ${learner!.set.words.length} words so far.`
               : "Hi, I'm Lexi, your GRE vocabulary tutor. We'll work through a set of 10 words together until each one sticks.";
             sendWord(null, word.brief, `${hello} ${word.spoken}`, greetingCommand.id);
           } else {

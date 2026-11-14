@@ -16,8 +16,39 @@ const words = Array.from({ length: 12 }, (_, i) => ({
 const reviews: { itemId: string; skill: string; verdict: string }[] = [];
 let gradeDelay = 0;
 
+const sessionRows: { summary: string | null }[] = [];
+const updates: { summary: string }[] = [];
+
+/** Just enough of the Supabase query builder for the relay's study_sessions calls. */
+function fakeDb() {
+  const query = (op: "select" | "insert" | "update", payload?: unknown) => {
+    const q: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "not", "order", "limit"]) q[m] = () => q;
+    q["maybeSingle"] = async () => ({ data: sessionRows.at(-1) ?? null, error: null });
+    q["single"] = async () => {
+      sessionRows.push(payload as { summary: string });
+      return { data: { id: `s${sessionRows.length}` }, error: null };
+    };
+    q["then"] = (resolve: (v: unknown) => void) => {
+      if (op === "update") {
+        updates.push(payload as { summary: string });
+        Object.assign(sessionRows.at(-1)!, payload);
+      }
+      resolve({ data: null, error: null });
+    };
+    return q;
+  };
+  return {
+    from: () => ({
+      select: () => query("select"),
+      insert: (row: unknown) => query("insert", row),
+      update: (row: unknown) => query("update", row),
+    }),
+  };
+}
+
 vi.mock("./supabase-user.server", () => ({
-  userClientFromToken: async () => ({ db: {}, userId: "u1" }),
+  userClientFromToken: async () => ({ db: fakeDb(), userId: "u1" }),
 }));
 vi.mock("./learning.server", () => ({
   loadWordsWithParts: async () => words,
@@ -93,6 +124,8 @@ function commentary(gateway: { sent: string[] }, delegation: string | null, kind
 
 afterEach(() => {
   reviews.length = 0;
+  sessionRows.length = 0;
+  updates.length = 0;
   gradeDelay = 0;
 });
 
@@ -140,6 +173,24 @@ describe("voice relay", () => {
     await tick(4100);
     expect(parsed(browser).some((e) => e.type === "app.voice.finished")).toBe(true);
   }, 10_000);
+
+  it("picks up the same set and word in the next call", async () => {
+    const first = await startCall();
+    first.gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning zero", start_ms: 1 });
+    first.gateway.push({ type: "session.delegation.created", delegation: { id: "d1", target: "client" } });
+    await tick(1700); // word0 graded and saved, now on word1
+    const saved = JSON.parse(sessionRows.at(-1)!.summary!);
+    expect(saved.current).toBe("w1");
+    expect(saved.words).toHaveLength(10);
+
+    const second = await startCall();
+    const spoken = commentary(second.gateway, null);
+    expect(spoken).toContain("Welcome back");
+    expect(spoken).toContain("Let's go back to word1");
+    const resumed = JSON.parse(sessionRows.at(-1)!.summary!);
+    expect(resumed.words.map((w: { slug: string }) => w.slug)).toEqual(saved.words.map((w: { slug: string }) => w.slug));
+    expect(resumed.words[0].asks).toBe(1);
+  });
 
   it("does not move on before the learner has answered", async () => {
     const { gateway } = await startCall();
