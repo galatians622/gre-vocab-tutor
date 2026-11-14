@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 import { Mic, MicOff, PhoneOff, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Progress as ProgressBar } from "@/components/ui/progress";
 import { PageHeader } from "@/components/app/app-shell";
 import { useLiveVoice, type LiveEvent } from "@/hooks/use-live-voice";
 import { supabase } from "@/integrations/supabase/client";
@@ -23,12 +24,15 @@ export const Route = createFileRoute("/_authenticated/voice")({
 
 type Line = { role: "you" | "tutor"; text: string };
 type Saved = { word: string; verdict: string; feedback: string };
+type Progress = { set_number: number; mastered: number; set_size: number; word: string | null; mode: "teach" | "review" };
 
 function Page() {
   const qc = useQueryClient();
   const [lines, setLines] = useState<Line[]>([]);
   const [saved, setSaved] = useState<Saved[]>([]);
   const [thinking, setThinking] = useState(false);
+  const [progress, setProgress] = useState<Progress | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const lastRole = useRef<Line["role"] | null>(null);
   const answerCount = useRef(0);
 
@@ -57,7 +61,12 @@ function Page() {
         });
       } else if (e.type === "app.delegation.pending") {
         setThinking(true);
+      } else if (e.type === "app.voice.progress") {
+        setProgress(e["progress"] as Progress);
+      } else if (e.type === "app.voice.save_failed") {
+        setNotice(`Your answer for "${String(e["word"])}" couldn't be saved. Keep going; it will come up again.`);
       } else if (e.type === "app.voice.saved") {
+        setNotice(null);
         const s = e["saved"] as Saved;
         setSaved((prev) => [s, ...prev]);
         answerCount.current += 1;
@@ -75,6 +84,8 @@ function Page() {
   const begin = () => {
     setLines([]);
     setSaved([]);
+    setProgress(null);
+    setNotice(null);
     lastRole.current = null;
     answerCount.current = 0;
     call.start();
@@ -85,9 +96,10 @@ function Page() {
       <PageHeader eyebrow="Practice out loud" title="Voice Tutor" />
       <div className="surface space-y-4 p-6">
         <p className="text-sm text-muted-foreground">
-          Lexi works through sets of 10 words. For each one you define it, explain how its root, prefix and suffix build the meaning,
-          and use it in a sentence. Words you get right the first time are checked once more; missed words come back until you get them right
-          three times in a row. A new set starts only once every word is mastered.
+          Just talk. Lexi leads the session through sets of 10 words: she asks what each word means, gives hints from its roots when
+          you need them, walks you through the definition and has you use it in a sentence, then moves straight on. A word is mastered
+          once you define it correctly, with no hints, three times in a row. A new set starts once every word is mastered, and your
+          progress is saved as you go, so you can pick up where you left off.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {!active ? (
@@ -111,9 +123,25 @@ function Page() {
             </Button>
           )}
           <span className="text-sm text-muted-foreground">
-            {call.status === "connecting" ? "Connecting…" : call.status === "connected" ? (thinking ? "Lexi is checking…" : "Listening") : call.status === "stopping" ? "Ending…" : ""}
+            {call.status === "connecting" ? "Connecting…" : call.status === "connected" ? (thinking ? "Lexi is getting the next word…" : "Listening") : call.status === "stopping" ? "Ending…" : ""}
           </span>
         </div>
+        {progress && (
+          <div className="space-y-2 rounded-lg bg-secondary p-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+              <span>
+                <span className="font-semibold">Set {progress.set_number}</span> · {progress.mastered} of {progress.set_size} mastered
+              </span>
+              {progress.word && (
+                <span className="text-muted-foreground">
+                  {progress.mode === "teach" ? "Learning" : "Reviewing"}: <span className="font-display text-base text-foreground">{progress.word}</span>
+                </span>
+              )}
+            </div>
+            <ProgressBar value={progress.set_size ? (progress.mastered / progress.set_size) * 100 : 0} />
+          </div>
+        )}
+        {notice && <p className="rounded-lg bg-accent-soft p-3 text-sm">{notice}</p>}
         {call.error && <p className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{call.error}</p>}
         <audio ref={call.audioRef} controls className="w-full" />
       </div>

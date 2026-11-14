@@ -46,22 +46,37 @@ function must<T>(res: { data: T | null; error: { message: string } | null }, wha
 
 // ---------- content ----------
 
+const PAGE = 1000;
+
+/** Supabase returns at most 1,000 rows per request, so read large tables page by page. */
+export async function selectAll<T>(
+  page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  what: string,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const batch = must(await page(from, from + PAGE - 1), what) ?? [];
+    rows.push(...batch);
+    if (batch.length < PAGE) return rows;
+  }
+}
+
 export async function loadWordsWithParts(db: DB): Promise<WordWithParts[]> {
   const [words, parts, roots] = await Promise.all([
-    db.from("words").select("*").order("word"),
-    db.from("word_morphemes").select("*"),
-    db.from("roots").select("id, slug, form, kind, meaning, origin"),
+    selectAll((a, b) => db.from("words").select("*").order("word").order("id").range(a, b), "words"),
+    selectAll((a, b) => db.from("word_morphemes").select("*").order("id").range(a, b), "word parts"),
+    selectAll((a, b) => db.from("roots").select("id, slug, form, kind, meaning, origin").order("id").range(a, b), "roots"),
   ]);
-  const rootById = new Map(must(roots, "roots").map((r) => [r.id, r]));
+  const rootById = new Map(roots.map((r) => [r.id, r]));
   const byWord = new Map<string, WordPart[]>();
-  for (const p of must(parts, "word parts")) {
+  for (const p of parts) {
     const root = rootById.get(p.root_id);
     if (!root) continue;
     const list = byWord.get(p.word_id) ?? [];
     list.push({ position: p.position, surface: p.surface, contribution: p.contribution, root });
     byWord.set(p.word_id, list);
   }
-  return must(words, "words").map((w) => ({
+  return words.map((w) => ({
     ...w,
     parts: (byWord.get(w.id) ?? []).sort((a, b) => a.position - b.position),
   }));

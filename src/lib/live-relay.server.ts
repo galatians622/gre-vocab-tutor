@@ -1,12 +1,33 @@
-import { createOpenAI } from "@ai-sdk/openai";
-import { stepCountIs, streamText, tool, type ModelMessage } from "ai";
 import process from "node:process";
-import { z } from "zod";
-import { applyReview, buildQueue, loadWordsWithParts } from "./learning.server";
+import { gradeVoiceWord } from "./ai.server";
+import { applyReview, buildQueue, loadWordsWithParts, selectAll, wordReference, type WordWithParts } from "./learning.server";
 import { userClientFromToken, type DB } from "./supabase-user.server";
-import { SET_SIZE, newSet, nextWord, recordResult, remaining, setComplete, isMastered, type VoiceSet } from "./voice-set";
+import {
+  MASTERY_STREAK,
+  SET_SIZE,
+  fillSet,
+  masteredCount,
+  newSet,
+  nextWord,
+  recordResult,
+  remaining,
+  replaySets,
+  setComplete,
+  type SetWord,
+  type Verdict,
+  type VoiceSet,
+} from "./voice-set";
 
-type Learner = { db: DB; userId: string; recorded: Set<string>; set?: VoiceSet; done: Set<string> };
+type Learner = {
+  db: DB;
+  userId: string;
+  words: Map<string, WordWithParts>;
+  set: VoiceSet;
+  /** Words from sets the learner already finished; never reused in a new set. */
+  finished: Set<string>;
+};
+/** The word the tutor is working on right now. */
+type CurrentWord = { slug: string; startIndex: number; quickCheck: boolean };
 type SavedAttempt = { word: string; verdict: string; feedback: string };
 
 export type LiveConfig = {
@@ -23,7 +44,7 @@ const liveSettings = {
   liveModel: "openai/gpt-live-1",
   backendModel: "openai/gpt-6-astra",
   openingInstructions:
-    "Greet the learner briefly as their GRE vocabulary tutor, say you'll work through a set of 10 words until each one sticks, then get the first word from the backend and ask about it.",
+    "Greet the learner warmly and briefly as Lexi, their GRE vocabulary tutor. In one sentence say you'll work through a set of 10 words together until each one sticks. Then go straight into the first word from the word briefing.",
 };
 
 export type LiveSocket = {
@@ -123,201 +144,142 @@ export function handleLiveRequest(request: Request): Response {
   return new Response(null, response);
 }
 
-const conversationInstructions = `You are Lexi, a calm, focused GRE vocabulary tutor speaking English.
-Keep replies short and spoken-friendly. Quiz one word at a time, always the word the backend gives you.
-For each word: 1) ask the learner to define it in their own words; 2) ask how its root, prefix or suffix build the meaning;
-3) ask them to use the word in their own sentence.
-Never say the definition before the learner tries. If they are stuck, give one small hint (for example the root's meaning) and let them try again.
-Acknowledgements: while the learner is answering or before the backend has graded, respond ONLY with a neutral word like "Okay", "Got it" or "Mm-hm".
-Never say "good", "great", "right", "nice" or "wrong" until the backend returns the grade; then praise only if it was correct, and say clearly what was missing if it was partial or incorrect.
-When you give or confirm a definition, always also read the example sentence from the backend so the learner hears the word in context.
-Give brief feedback on the learner's own sentence: whether it uses the word correctly, and a better version if not.
-Words come in sets of 10. The learner cannot move to a new set until the backend says the set is mastered; words they missed come back several times. If they ask to skip ahead, explain that briefly and continue.
+const conversationInstructions = `You are Lexi, a warm, encouraging GRE vocabulary tutor speaking English. You lead the session like a great private tutor. The learner should never have to tell you to continue.
+
+You get a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies, and never read the briefing's labels aloud.
+
+MODE TEACH (first time with this word):
+1. Say the word clearly and ask what they think it means. Never give the definition first.
+2. If they are unsure or only partly right, give a hint built from a root or affix (for example: "bene means well. Does that help?") and let them try again. Give at most two hints.
+3. Tell them honestly how they did: confirm what was right, correct what was off, then give the verified definition and read the example sentence.
+4. Talk through the root and affixes and how they build the meaning. Ask one quick question to check they follow.
+5. Ask them to use the word in their own sentence. If it misuses the word, explain why and ask for another. If you are still not sure they understand, check another way, such as a quick scenario or asking for an opposite.
+6. Once you are satisfied, delegate to the backend to save the word and get the next one.
+
+MODE QUICK CHECK (a word they have seen before):
+Ask them to define it. If they nail it, give brief praise and delegate. If not, correct it with the verified definition and example, give a one line root reminder, ask for a sentence, then delegate.
+
+Grading: judge every answer yourself against the verified definition and react right away. Never wait for the backend before giving feedback. Be honest: say clearly when an answer is partly right or wrong, and praise only correct answers.
+
+Keep it flowing:
+- Keep each reply short: one or two sentences and one question at a time.
+- When you delegate, say a short bridge such as "Nice work, let's keep going." The next briefing arrives in a moment. Introduce the next word as soon as it arrives, without waiting for the learner and without asking if they are ready.
+- Mention progress now and then using the briefing, for example "That's four of ten mastered."
+- If the learner goes off topic or asks a question, answer briefly, then return to the word.
+
+Set rules: words come in sets of 10. A word is mastered after the learner defines it correctly with no hints ${MASTERY_STREAK} times in a row. Missed words come back later. A new set starts only when every word in the set is mastered. If the learner asks to skip, say it will come back later and delegate.
+
 Backchannel policy: Use moderate neutral listening sounds without taking over.
 Interruption policy: Stop your answer and listen when the learner interrupts.
 Delegation policy:
-Backend tools: Get the next word in the learner's 10-word set with its verified definition, example sentence and word parts; grade and save each answer.
-Delegate to the backend when: You need the next word, or the learner has finished a word (definition, origin explanation and their sentence) and it must be graded,
-or the learner corrects an answer the backend is grading.
-Do not delegate to the backend when: Greeting, giving a hint, clarifying, or repeating feedback already given.
-Never invent definitions or etymologies; use the backend's verified data. Every word has a verified definition in the backend result — never tell the learner a definition is unavailable. If you don't have it yet, delegate to the backend for it. Wait for the backend result before announcing a grade.`;
+Backend tools: Save the finished word's result to the learner's progress and return the briefing for the next word.
+Delegate to the backend when: You have finished a word, or the learner asks to skip or move on to another word.
+Do not delegate to the backend when: Greeting, giving hints, explaining, checking understanding, answering questions about the current word, or giving feedback. You already have every fact you need in the briefing.`;
 
 function isListeningSound(text: string) {
   const normalized = text.toLowerCase().replace(/[\s\p{Pd}]/gu, "");
   return /^(?:m+hm+|uhhuh)[.,!]*$/.test(normalized);
 }
 
-async function answerQuestion(
-  messages: ModelMessage[],
-  config: LiveConfig,
-  correlation: { runID: string; sessionID: string | undefined; delegationID: string },
-  signal: AbortSignal,
-  consumeInput: () => void,
-  onSaved: (saved: SavedAttempt) => void,
-  learner: Learner,
-) {
-  signal.throwIfAborted();
-  const provider = createOpenAI({
-    baseURL: gatewayAPIBase(config.baseURL),
-    apiKey: config.key,
-    headers: {
-      "Lovable-API-Key": config.key,
-      "X-Lovable-AIG-SDK": "vercel-ai-sdk",
-    },
-  });
-  let responseCursor = 0;
-  consumeInput();
-  const result = streamText({
-    model: provider.responses(config.backendModel),
-    abortSignal: signal,
-    maxRetries: 0,
-    stopWhen: stepCountIs(50),
-    includeRawChunks: true,
-    prepareStep() {
-      consumeInput();
-      return { messages: [...messages] };
-    },
-    onStepFinish(step) {
-      messages.push(...step.response.messages.slice(responseCursor));
-      responseCursor = step.response.messages.length;
-    },
-    headers: {
-      "X-Lovable-AIG-Run-ID": correlation.runID,
-      "X-Lovable-AIG-Metadata": JSON.stringify({
-        live_session_id: correlation.sessionID,
-        delegation_id: correlation.delegationID,
-      }),
-    },
-    providerOptions: {
-      openai: {
-        store: false,
-        ...(config.backendModel !== "openai/chat-latest"
-          ? {
-              forceReasoning: true,
-              reasoningEffort: "low",
-              reasoningSummary: "auto",
-              include: ["reasoning.encrypted_content"],
-            }
-          : {}),
-      },
-    },
-    system:
-      "You are the backend for a spoken GRE vocabulary tutor. Transcripts may be incomplete or corrected; use the latest correction. " +
-      "Continue from completed tool results; never record the same answer twice. " +
-      "When the tutor needs a word, call next_word and reply with that word plus its verified definition, example sentence and word parts for the tutor's eyes. " +
-      "When the learner has answered a word, grade it strictly against the verified reference: the definition must capture the core meaning, " +
-      "and the origin explanation must name the right root or affix and connect it to the meaning. Call record_answer once for the definition (skill recall) " +
-      "and once for the origin explanation (skill root_recognition) when they explained it. Hinted answers count as hints_used 1. " +
-      "Also judge the learner's own sentence (put that feedback in the recall feedback). The recall verdict is 'correct' only if the definition was right. " +
-      "After record_answer, call next_word in the same turn. " +
-      "Your reply is the tutor's ONLY source of facts, so always copy the verified definition and example sentence word-for-word into it (for the graded word and for the next word). Every word in this app has a verified definition; never say one is missing. " +
-      "Then reply in at most 110 words: the grade (praise only if correct), a short correction, the verified definition with its example sentence, feedback on their sentence, " +
-      "the set progress, and the next word to ask. Be fast: no extra tool calls. Use only verified data from tools.",
-    messages,
-    tools: {
-      next_word: tool({
-        description:
-          "Get the next word to quiz from the learner's current 10-word set. Missed words come back until mastered; a new set only starts when every word is mastered.",
-        inputSchema: z.object({}).strict(),
-        execute: async () => {
-          signal.throwIfAborted();
-          const all = await loadWordsWithParts(learner.db);
-          let newSetStarted = false;
-          if (!learner.set || setComplete(learner.set)) {
-            learner.set?.words.forEach((w) => learner.done.add(w.slug));
-            const { items } = await buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 30 });
-            const slugs: string[] = [];
-            for (const i of items) if (!learner.done.has(i.word.slug) && !slugs.includes(i.word.slug)) slugs.push(i.word.slug);
-            for (const w of all) if (slugs.length < SET_SIZE && !learner.done.has(w.slug) && !slugs.includes(w.slug)) slugs.push(w.slug);
-            learner.set = newSet(slugs, (learner.set?.setNumber ?? 0) + 1);
-            newSetStarted = true;
-          }
-          const pick = nextWord(learner.set);
-          if (!pick) return { error: "No words available" };
-          const w = all.find((x) => x.slug === pick.slug)!;
-          const set = learner.set;
-          return {
-            set_number: set.setNumber,
-            new_set_started: newSetStarted,
-            words_mastered_in_set: set.words.filter(isMastered).length,
-            set_size: set.words.length,
-            this_word: { times_asked: pick.asks, correct_answers_still_needed: remaining(pick) },
-            slug: w.slug,
-            word: w.word,
-            part_of_speech: w.part_of_speech,
-            definition: w.definition,
-            plain_english: w.plain_english,
-            example_sentence: w.examples?.[0] ?? null,
-            etymology: w.etymology,
-            parts: w.parts.map((p) => ({ part: p.surface, kind: p.root.kind, meaning: p.root.meaning, contribution: p.contribution })),
-          };
-        },
-      }),
-      record_answer: tool({
-        description: "Grade and save one learner answer to their study progress.",
-        inputSchema: z
-          .object({
-            word_slug: z.string().min(1).max(80),
-            skill: z.enum(["recall", "root_recognition"]),
-            verdict: z.enum(["correct", "partial", "incorrect", "skipped"]),
-            hints_used: z.number().int().min(0).max(3),
-            learner_answer: z.string().max(1000),
-            feedback: z.string().max(600),
-          })
-          .strict(),
-        execute: async (args) => {
-          signal.throwIfAborted();
-          const key = `${args.word_slug}|${args.skill}|${args.learner_answer.trim().toLowerCase()}`;
-          if (learner.recorded.has(key)) return { saved: true, duplicate: true };
-          const words = await loadWordsWithParts(learner.db);
-          const word = words.find((w) => w.slug === args.word_slug);
-          if (!word) return { saved: false, error: "Unknown word slug" };
-          await applyReview(learner.db, learner.userId, {
-            itemType: "word",
-            itemId: word.id,
-            skill: args.skill,
-            activity: "voice",
-            verdict: args.verdict,
-            hintsUsed: args.hints_used,
-            response: args.learner_answer,
-            feedback: args.feedback,
-            source: "voice",
-          });
-          learner.recorded.add(key);
-          let progress: object | undefined;
-          if (args.skill === "recall" && learner.set) {
-            const r = recordResult(learner.set, args.word_slug, args.verdict, args.hints_used);
-            if (r) progress = { word_mastered: isMastered(r), correct_answers_still_needed: remaining(r), set_mastered: setComplete(learner.set) };
-          }
-          if (args.skill === "recall") onSaved({ word: word.word, verdict: args.verdict, feedback: args.feedback });
-          return {
-            saved: true,
-            progress,
-            verified_reference: { word: word.word, definition: word.definition, example_sentence: word.examples?.[0] ?? null, etymology: word.etymology },
-          };
-        },
-      }),
-    },
-  });
-  let completed = false;
-  let stepCompleted = false;
-  let failed = false;
-  // Drain through HTTP EOF so successful work is not recorded as cancelled by the Gateway.
-  for await (const part of result.fullStream) {
-    if (part.type === "start-step") stepCompleted = false;
-    if (part.type === "raw" && part.rawValue && typeof part.rawValue === "object" && "type" in part.rawValue) {
-      if (part.rawValue.type === "response.completed") stepCompleted = true;
-      if (part.rawValue.type === "response.failed" || part.rawValue.type === "response.incomplete") failed = true;
-    }
-    if (part.type === "finish-step" && !stepCompleted) failed = true;
-    if (part.type === "error" || part.type === "abort") failed = true;
-    if (part.type === "finish") completed = part.finishReason === "stop";
+// ---------- learner data ----------
+
+// Word content is shared by everyone and rarely changes, so keep one copy per server instance.
+let wordCache: { at: number; promise: Promise<WordWithParts[]> } | undefined;
+function cachedWords(db: DB) {
+  if (!wordCache || Date.now() - wordCache.at > 10 * 60_000) {
+    const promise = loadWordsWithParts(db);
+    wordCache = { at: Date.now(), promise };
+    promise.catch(() => {
+      if (wordCache?.promise === promise) wordCache = undefined;
+    });
   }
-  signal.throwIfAborted();
-  if (failed || !completed) throw new Error("The backend response did not complete");
-  const answer = await result.text;
-  if (!answer.trim()) throw new Error("The backend response had no answer");
-  return answer;
+  return wordCache.promise;
+}
+
+async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner> {
+  const [all, events] = await Promise.all([
+    cachedWords(auth.db),
+    selectAll(
+      (a, b) =>
+        auth.db
+          .from("review_events")
+          .select("item_id, verdict, hints_used, created_at")
+          .eq("user_id", auth.userId)
+          .eq("source", "voice")
+          .eq("skill", "recall")
+          .eq("item_type", "word")
+          .order("created_at", { ascending: true })
+          .range(a, b),
+      "voice history",
+    ),
+  ]);
+  const words = new Map(all.map((w) => [w.slug, w]));
+  const slugById = new Map(all.map((w) => [w.id, w.slug]));
+  const verdicts = new Set<Verdict>(["correct", "partial", "incorrect", "skipped"]);
+  const answers = events.flatMap((e) => {
+    const slug = slugById.get(e.item_id);
+    const verdict = e.verdict as Verdict;
+    return slug && verdicts.has(verdict) ? [{ slug, verdict, hintsUsed: e.hints_used ?? 0 }] : [];
+  });
+  const { set, finished } = replaySets(answers);
+  const learner: Learner = { ...auth, words, set, finished };
+  await topUpSet(learner);
+  return learner;
+}
+
+/** Fills open slots in the current set: due and weak words first, then new words. */
+async function topUpSet(learner: Learner) {
+  if (learner.set.words.length >= SET_SIZE) return;
+  const taken = (slug: string) => learner.finished.has(slug) || learner.set.words.some((w) => w.slug === slug);
+  const { items } = await buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 30 });
+  const picks: string[] = [];
+  for (const i of items) if (!taken(i.word.slug) && !picks.includes(i.word.slug)) picks.push(i.word.slug);
+  fillSet(learner.set, picks);
+  if (learner.set.words.length < SET_SIZE) {
+    for (const w of learner.words.values()) {
+      if (learner.set.words.length >= SET_SIZE) break;
+      if (!taken(w.slug)) fillSet(learner.set, [w.slug]);
+    }
+  }
+}
+
+function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: string) {
+  const set = learner.set;
+  const lines = [
+    "WORD BRIEFING (verified facts for you only; do not read these labels aloud)",
+    entry.asks === 0
+      ? "Mode: TEACH. First time with this word."
+      : `Mode: QUICK CHECK. Seen ${entry.asks} time${entry.asks === 1 ? "" : "s"} before.`,
+    `Word: ${word.word} (${word.part_of_speech})`,
+    `Definition: ${word.definition}`,
+    `Plain English: ${word.plain_english}`,
+  ];
+  if (word.examples?.[0]) lines.push(`Example sentence: ${word.examples[0]}`);
+  if (word.parts.length) {
+    lines.push(
+      "Word parts: " +
+        word.parts.map((p) => `${p.surface} = "${p.root.meaning}" (${p.root.kind}, ${p.root.origin}): ${p.contribution}`).join(" | "),
+    );
+  }
+  if (word.etymology) lines.push(`Etymology: ${word.etymology}`);
+  if (word.confused_note) lines.push(`Commonly confused: ${word.confused_note}`);
+  lines.push(
+    `Progress: set ${set.setNumber}, ${masteredCount(set)} of ${set.words.length} words mastered. ` +
+      `This word needs ${remaining(entry)} more clean correct answer${remaining(entry) === 1 ? "" : "s"}.`,
+  );
+  if (note) lines.push(note);
+  return lines.join("\n");
+}
+
+function transcriptText(items: Transcript[]) {
+  const turns: { role: Transcript["role"]; text: string }[] = [];
+  for (const t of items) {
+    if (t.listeningSound) continue;
+    const last = turns.at(-1);
+    if (last?.role === t.role) last.text += t.text;
+    else turns.push({ role: t.role, text: t.text });
+  }
+  return turns.map((t) => `${t.role === "user" ? "Learner" : "Tutor"}: ${t.text.trim()}`).join("\n");
 }
 
 function* commentaryChunks(content: string) {
@@ -345,6 +307,8 @@ function* commentaryChunks(content: string) {
   if (chunk) yield chunk;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export function bindLiveConnection(
   browser: LiveSocket,
   configuration: LiveConfig,
@@ -359,21 +323,15 @@ export function bindLiveConnection(
   let starting = false;
   let closing = false;
   let finished = false;
-  let revision = 0;
-  let task: AbortController | undefined;
-  const pendingDelegations: Array<{
-    event: ProviderEvent;
-    plan?: SavedAttempt;
-  }> = [];
-  let completedDelegation: (typeof pendingDelegations)[number] | undefined;
-  const backendMessages: ModelMessage[] = [];
-  let transcriptCursor = 0;
-  let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let finishDrain: (() => void) | undefined;
   let browserReady = false;
   let learner: Learner | undefined;
+  let current: CurrentWord | undefined;
+  /** Grades still being saved, by word slug. */
+  const grading = new Map<string, Promise<void>>();
+  let delegationChain: Promise<void> = Promise.resolve();
   let greetingRequested = false;
   let greetingCommand: { id: string; type: "instructions" | "commentary" } | undefined;
   let greetingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -407,12 +365,49 @@ export function bindLiveConnection(
     greetingCommand = undefined;
   }
 
+  function sendCommentary(delegationID: string | null, content: string, lastEventID?: string) {
+    const chunks = [...commentaryChunks(content)];
+    chunks.forEach((chunk, i) => {
+      gateway?.send(
+        JSON.stringify({
+          type: "session.commentary.append",
+          event_id: i === chunks.length - 1 && lastEventID ? lastEventID : crypto.randomUUID(),
+          delegation_id: delegationID,
+          content: chunk,
+        }),
+      );
+    });
+  }
+
+  function emitProgress() {
+    if (!learner) return;
+    const word = current ? learner.words.get(current.slug) : undefined;
+    emit({
+      type: "app.voice.progress",
+      progress: {
+        set_number: learner.set.setNumber,
+        mastered: masteredCount(learner.set),
+        set_size: learner.set.words.length,
+        word: word?.word ?? null,
+        mode: current?.quickCheck ? "review" : "teach",
+      },
+    });
+  }
+
+  /** Makes `entry` the current word and returns its briefing for the tutor. */
+  function startWord(entry: SetWord, note?: string) {
+    const word = learner!.words.get(entry.slug)!;
+    current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: entry.asks > 0 };
+    emitProgress();
+    return briefing(learner!, word, entry, note);
+  }
+
   function requestGreeting() {
     const content = (
       config.openingInstructions ??
       "Start the conversation now in your configured language and role. Give a brief greeting suited to this app's purpose, ask one relevant opening question, then listen."
     ).trim();
-    if (!content || !browserReady || !sessionID || greetingRequested || closing) return;
+    if (!content || !browserReady || !sessionID || !learner || greetingRequested || closing) return;
     greetingRequested = true;
     if (new TextEncoder().encode(content).length > 480) {
       emit({ type: "app.greeting.error", error: { message: "The opening instructions are too long" } });
@@ -433,22 +428,13 @@ export function bindLiveConnection(
     );
   }
 
-  function discardPendingWork() {
-    pendingDelegations.length = 0;
-    completedDelegation = undefined;
-    clearTimeout(restartTimer);
-    task?.abort();
-  }
-
   function finish() {
     if (finished) return;
     finished = closing = true;
     clearTimeout(startTimer);
     clearTimeout(startupTimer);
     clearTimeout(closeTimer);
-    clearTimeout(restartTimer);
     clearGreeting();
-    discardPendingWork();
     setupAbort.abort();
     close(gateway);
     close(browser);
@@ -458,7 +444,6 @@ export function bindLiveConnection(
   function stop() {
     if (closing) return;
     closing = true;
-    discardPendingWork();
     clearTimeout(startupTimer);
     clearTimeout(startTimer);
     clearGreeting();
@@ -479,79 +464,117 @@ export function bindLiveConnection(
     }
   }
 
-  function scheduleDelegation() {
-    clearTimeout(restartTimer);
-    if (closing || task || pendingDelegations.length === 0) return;
-    restartTimer = setTimeout(() => void runDelegation(), 300);
+  /**
+   * Grades a finished word in the background. The conversation has already moved on, so a slow
+   * grader never makes the learner wait.
+   */
+  function gradeInBackground(word: CurrentWord, endIndex: number, offsetMs: number | undefined) {
+    const active = learner!;
+    const task = (async () => {
+      // Let the learner's last words finish transcribing.
+      await sleep(1500);
+      const late = transcripts
+        .slice(endIndex)
+        .filter((t) => t.role === "user" && (typeof offsetMs !== "number" || t.start_ms <= offsetMs));
+      const text = transcriptText([...transcripts.slice(word.startIndex, endIndex), ...late]);
+      const entry = active.words.get(word.slug)!;
+      const grade = await gradeVoiceWord({
+        reference: wordReference(entry),
+        transcript: text,
+        quickCheck: word.quickCheck,
+        signal: AbortSignal.timeout(45_000),
+      });
+      const verdict: Verdict = grade.learner_attempted ? grade.definition_verdict : "skipped";
+      const hints = grade.hints_used;
+      await applyReview(active.db, active.userId, {
+        itemType: "word",
+        itemId: entry.id,
+        skill: "recall",
+        activity: "voice",
+        verdict,
+        hintsUsed: hints,
+        response: grade.learner_definition,
+        feedback: grade.feedback,
+        misconception: grade.misconception,
+        source: "voice",
+      });
+      if (grade.explained_origin && grade.origin_verdict) {
+        await applyReview(active.db, active.userId, {
+          itemType: "word",
+          itemId: entry.id,
+          skill: "root_recognition",
+          activity: "voice",
+          verdict: grade.origin_verdict,
+          hintsUsed: hints,
+          response: grade.learner_definition,
+          feedback: grade.feedback,
+          source: "voice",
+        });
+      }
+      recordResult(active.set, word.slug, verdict, hints);
+      const saved: SavedAttempt = { word: entry.word, verdict: hints > 0 && verdict === "correct" ? "partial" : verdict, feedback: grade.feedback };
+      emit({ type: "app.voice.saved", saved });
+      emitProgress();
+    })()
+      .catch((error) => {
+        console.error("Voice grading failed", error);
+        emit({ type: "app.voice.save_failed", word: active.words.get(word.slug)?.word ?? word.slug });
+      })
+      .finally(() => {
+        if (grading.get(word.slug) === task) grading.delete(word.slug);
+      });
+    grading.set(word.slug, task);
+    execution.waitUntil(task);
+    return task;
   }
 
-  function deliverResult(delegationID: string, answer: string, plan?: SavedAttempt) {
+  function deliver(delegationID: string, content: string) {
     if (closing) return;
     if (gateway?.readyState !== 1) return stop();
     try {
-      for (const content of commentaryChunks(answer)) {
-        gateway.send(
-          JSON.stringify({
-            type: "session.commentary.append",
-            event_id: crypto.randomUUID(),
-            delegation_id: delegationID,
-            content,
-          }),
-        );
-      }
-            completedDelegation = pendingDelegations.shift();
+      sendCommentary(delegationID, content);
     } catch {
       stop();
     }
   }
 
-  async function runDelegation() {
-    const pending = pendingDelegations[0];
-    const event = pending?.event;
-    const id = event?.delegation?.id;
-    if (!pending || !event || !id || closing || task) return;
-    if (!transcripts.some(({ role, text }) => role === "user" && text.trim())) return;
-    const controller = new AbortController();
-    task = controller;
-    let taskRevision = revision;
-    try {
-      const answer = await answerQuestion(
-        backendMessages,
-        config,
-        { runID, sessionID, delegationID: id },
-        controller.signal,
-        () => {
-          const updates = transcripts.slice(transcriptCursor);
-          if (updates.some(({ role, listeningSound }) => role === "user" && !listeningSound)) delete pending.plan;
-          backendMessages.push(...updates.map(({ role, text }) => ({ role, content: text })));
-          transcriptCursor = transcripts.length;
-          taskRevision = revision;
-        },
-        (saved) => emit({ type: "app.voice.saved", delegation_id: id, saved }),
-        learner!,
-      );
-      if (closing || controller.signal.aborted) return;
-      if (taskRevision !== revision) return;
-      deliverResult(id, answer.trim(), pending.plan);
-    } catch {
-      if (closing || controller.signal.aborted) return;
-      backendMessages.push({
-        role: "assistant",
-        content:
-          "The backend attempt failed. Completed tool results remain valid; verify uncertain external actions before any retry.",
-      });
-      if (taskRevision !== revision) return;
-      deliverResult(id, "The backend could not finish the answer. Ask whether the user wants to try again.");
-    } finally {
-      if (task === controller) task = undefined;
-      scheduleDelegation();
-    }
-  }
+  async function handleDelegation(event: ProviderEvent) {
+    const id = event.delegation?.id;
+    if (!id || closing || !learner) return;
+    const active = learner;
+    const endIndex = transcripts.length;
+    const finishing = current;
 
-  function queueDelegation(event: ProviderEvent) {
-    pendingDelegations.push({ event });
-    emit({ type: "app.delegation.pending", delegation_id: event.delegation?.id });
-    scheduleDelegation();
+    if (finishing) {
+      const answered = transcripts.slice(finishing.startIndex).some((t) => t.role === "user" && !t.listeningSound && t.text.trim());
+      if (!answered) {
+        const word = active.words.get(finishing.slug)!;
+        return deliver(id, `Nothing to save yet: the learner has not answered "${word.word}". Keep working on this word with them.`);
+      }
+      gradeInBackground(finishing, endIndex, event.offset_ms);
+    }
+
+    // Pick the next word right away. Words still being graded are skipped.
+    let pick = nextWord(active.set, new Set(grading.keys()));
+    if (!pick && grading.size) {
+      // Only words being graded are left open: their grades decide whether the set is done.
+      await Promise.race([Promise.allSettled([...grading.values()]), sleep(30_000)]);
+      if (closing) return;
+      pick = nextWord(active.set);
+    }
+    let note: string | undefined;
+    if (!pick && setComplete(active.set)) {
+      active.set.words.forEach((w) => active.finished.add(w.slug));
+      active.set = newSet([], active.set.setNumber + 1);
+      await topUpSet(active);
+      if (closing) return;
+      pick = nextWord(active.set);
+      note = `The learner just mastered every word in set ${active.set.setNumber - 1}. Congratulate them warmly, then start set ${active.set.setNumber} with this word.`;
+    }
+    if (!pick) {
+      return deliver(id, "There are no more words available right now. Congratulate the learner on their progress and wrap up the session.");
+    }
+    deliver(id, startWord(pick, note ?? "Introduce this word now."));
   }
 
   function receiveGateway(data: unknown) {
@@ -576,14 +599,11 @@ export function bindLiveConnection(
       ) {
         if (greetingCommand.type === "instructions") {
           greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
-          gateway?.send(
-            JSON.stringify({
-              type: "session.commentary.append",
-              event_id: greetingCommand.id,
-              delegation_id: null,
-              content: "Begin the conversation now, following the instructions provided.",
-            }),
-          );
+          const first = nextWord(learner!.set);
+          const brief = first
+            ? startWord(first, learner!.set.words.some((w) => w.asks > 0) ? "The learner is resuming this set from an earlier session." : undefined)
+            : "There are no words available right now. Apologize briefly.";
+          sendCommentary(null, `${brief}\n\nBegin the conversation now, following the instructions provided.`, greetingCommand.id);
         } else {
           clearGreeting();
           emit({ type: "app.greeting.accepted" });
@@ -595,43 +615,24 @@ export function bindLiveConnection(
       if (event.type === "session.input_transcript.delta" || event.type === "session.output_transcript.delta") {
         const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
         if (!event.delta?.trim()) return;
-        const listeningSound = role === "user" && Boolean(task) && isListeningSound(event.delta);
         transcripts.push({
           role,
           text: event.delta,
           start_ms: event.start_ms ?? 0,
           end_ms: event.end_ms ?? 0,
-          listeningSound,
+          listeningSound: role === "user" && isListeningSound(event.delta),
         });
-        if (listeningSound) return;
-        if (role === "user") {
-          revision++;
-          const offset = completedDelegation?.event.offset_ms;
-          // Live has no transcript watermark; completed handoffs can receive late context.
-          if (
-            pendingDelegations.length === 0 &&
-            completedDelegation &&
-            typeof offset === "number" &&
-            Number.isFinite(offset) &&
-            offset >= 0 &&
-            typeof event.start_ms === "number" &&
-            Number.isFinite(event.start_ms) &&
-            event.start_ms >= 0 &&
-            event.start_ms <= offset
-          ) {
-            pendingDelegations.push(completedDelegation);
-            completedDelegation = undefined;
-          }
-          if (pendingDelegations.length) {
-            emit({ type: "app.delegation.pending", delegation_id: pendingDelegations[0]?.event.delegation?.id });
-          }
-        }
-        scheduleDelegation();
       } else if (event.type === "session.delegation.created") {
         const id = event.delegation?.id;
         if (id && event.delegation?.target === "client" && !delegations.has(id)) {
           delegations.add(id);
-          queueDelegation(event);
+          emit({ type: "app.delegation.pending", delegation_id: id });
+          delegationChain = delegationChain
+            .then(() => handleDelegation(event))
+            .catch((error) => {
+              console.error("Voice delegation failed", error);
+              if (!closing) deliver(id, "Saving that word failed. Tell the learner briefly, then keep practicing the current word.");
+            });
         }
       }
     } catch {
@@ -643,14 +644,16 @@ export function bindLiveConnection(
   async function startSession(sdp: string, token: unknown) {
     if (closing || browser.readyState !== 1) return;
     const auth = typeof token === "string" ? await userClientFromToken(token) : null;
-    learner = auth ? { ...auth, recorded: new Set<string>(), done: new Set<string>() } : undefined;
-    if (!learner) throw new Error("Please sign in again to use the voice tutor.");
+    if (!auth) throw new Error("Please sign in again to use the voice tutor.");
     if (closing || browser.readyState !== 1) return;
     clearTimeout(startTimer);
     startupTimer = setTimeout(() => {
       emit({ type: "app.error", error: { message: "Voice startup timed out" } });
       stop();
     }, 40_000);
+    // Load the learner's words and set while the voice line connects.
+    const preparing = prepareLearner(auth);
+    preparing.catch(() => undefined);
     const accepted = await connect(
       new URL(`${gatewayAPIBase(config.baseURL)}/live/sessions`).href,
       {
@@ -683,6 +686,10 @@ export function bindLiveConnection(
         transport: { type: "webrtc", sdp },
       }),
     );
+    learner = await preparing;
+    if (closing) return;
+    emitProgress();
+    requestGreeting();
   }
 
   browser.onMessage((data) => {
