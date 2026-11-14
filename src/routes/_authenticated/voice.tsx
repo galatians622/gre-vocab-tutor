@@ -96,9 +96,9 @@ function Page() {
       <PageHeader eyebrow="Practice out loud" title="Voice Tutor" />
       <div className="surface space-y-4 p-6">
         <p className="text-sm text-muted-foreground">
-          Just talk. Lexi leads the session through sets of 10 words: she asks what each word means, gives hints from its roots when
-          you need them, walks you through the definition and has you use it in a sentence, then moves straight on. A word is mastered
-          once you define it correctly, with no hints, three times in a row. A new set starts once every word is mastered, and your
+          Just talk. Lexi leads the session through sets of 10 words: she breaks each new word into its roots and affixes and asks
+          what you think it means, walks you through the definition, and has you use it in a sentence. A word is mastered
+          once you define it correctly, with no hints, three times in a row. She won't move on until you've both stated the definition and used the word correctly in your own sentence. A new set starts once every word is mastered, and your
           progress is saved as you go, so you can pick up where you left off.
         </p>
         <div className="flex flex-wrap items-center gap-2">
