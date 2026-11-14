@@ -76,7 +76,7 @@ vi.mock("./ai.server", () => ({
   },
 }));
 
-import { bindLiveConnection, type LiveSocket } from "./live-relay.server";
+import { bindLiveConnection, decodeSet, type LiveSocket } from "./live-relay.server";
 
 function fakeSocket() {
   const handlers: { message: ((d: unknown) => void)[]; close: (() => void)[] } = { message: [], close: [] };
@@ -190,6 +190,15 @@ describe("voice relay", () => {
     const resumed = JSON.parse(sessionRows.at(-1)!.summary!);
     expect(resumed.words.map((w: { slug: string }) => w.slug)).toEqual(saved.words.map((w: { slug: string }) => w.slug));
     expect(resumed.words[0].asks).toBe(1);
+    expect(resumed.words[0].passed).toBe(true);
+  });
+
+  it("converts sets saved under the old three-in-a-row rule", () => {
+    const words = Array.from({ length: 10 }, (_, i) => ({ slug: `w${i}`, asks: 4, streak: i < 5 ? 1 : 0, firstTryCorrect: false, lastAskedAt: i }));
+    const decoded = decodeSet(JSON.stringify({ v: 1, set_number: 1, words, clock: 40, last_slug: "w9", current: "w5", finished: [] }), () => true)!;
+    expect(decoded.set.phase).toBe("learn");
+    expect(decoded.set.words.filter((w) => w.passed)).toHaveLength(5);
+    expect(decoded.current).toBe("w5");
   });
 
   it("does not move on before the learner has answered", async () => {

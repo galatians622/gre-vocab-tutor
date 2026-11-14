@@ -1,54 +1,48 @@
-// Voice Tutor word sets: the learner can't move to a new set of words until every
-// word in the current set is mastered.
-// A word is mastered once the learner defines it correctly, with no hints, three times in a row.
-// Any miss, partial answer or hint resets that word's streak to zero.
+// Voice Tutor word sets of 10, in two rounds:
+// 1. Learn round: every word is taught once. A word the learner gets right on the first try (no
+//    hints) is cleared. A missed word comes back after a few other words, until it's right on the
+//    first try.
+// 2. Review round: once all 10 are cleared, every word is asked once more. Missed words come back
+//    the same way until they're right on the first try.
+// The next set starts when the review round is done.
 export const SET_SIZE = 10;
-export const MASTERY_STREAK = 3;
+/** How many other words come between a miss and the retest. */
+export const RETEST_GAP = 3;
 
 export type Verdict = "correct" | "partial" | "incorrect" | "skipped";
+export type Phase = "learn" | "review";
 
 export type SetWord = {
   slug: string;
+  /** Times asked in total. */
   asks: number;
+  /** Times asked in the current round. */
+  phaseAsks: number;
+  /** Cleared in the current round. */
+  passed: boolean;
+  /** Clock value when a missed word may be retested. */
+  dueAt: number;
   firstTryCorrect: boolean | null;
-  streak: number;
   lastAskedAt: number;
 };
 
-export type VoiceSet = { words: SetWord[]; clock: number; lastSlug: string | null; setNumber: number };
+export type VoiceSet = { words: SetWord[]; clock: number; lastSlug: string | null; setNumber: number; phase: Phase };
 
 export function newSet(slugs: string[], setNumber = 1): VoiceSet {
-  return {
-    words: slugs.slice(0, SET_SIZE).map(blankWord),
-    clock: 0,
-    lastSlug: null,
-    setNumber,
-  };
+  return { words: slugs.slice(0, SET_SIZE).map(blankWord), clock: 0, lastSlug: null, setNumber, phase: "learn" };
 }
 
-function blankWord(slug: string): SetWord {
-  return { slug, asks: 0, firstTryCorrect: null, streak: 0, lastAskedAt: -1 };
+export function blankWord(slug: string): SetWord {
+  return { slug, asks: 0, phaseAsks: 0, passed: false, dueAt: 0, firstTryCorrect: null, lastAskedAt: -1 };
 }
 
-/** Adds words to a set that has open slots (for example after resuming a partly asked set). */
+/** Adds words to a set that has open slots. */
 export function fillSet(set: VoiceSet, slugs: string[]) {
   for (const slug of slugs) {
     if (set.words.length >= SET_SIZE) break;
     if (!set.words.some((w) => w.slug === slug)) set.words.push(blankWord(slug));
   }
   return set;
-}
-
-export function requiredStreak(_w?: SetWord) {
-  return MASTERY_STREAK;
-}
-
-export function isMastered(w: SetWord) {
-  return w.streak >= MASTERY_STREAK;
-}
-
-export function remaining(w: SetWord) {
-  return Math.max(0, MASTERY_STREAK - w.streak);
 }
 
 export function isClean(verdict: Verdict, hintsUsed: number) {
@@ -61,54 +55,64 @@ export function recordResult(set: VoiceSet, slug: string, verdict: Verdict, hint
   const clean = isClean(verdict, hintsUsed);
   if (w.firstTryCorrect === null) w.firstTryCorrect = clean;
   w.asks += 1;
-  w.streak = clean ? w.streak + 1 : 0;
+  w.phaseAsks += 1;
+  w.passed = clean;
   w.lastAskedAt = set.clock++;
+  w.dueAt = clean ? 0 : set.clock + RETEST_GAP;
   set.lastSlug = slug;
+  if (set.phase === "learn" && set.words.length >= SET_SIZE && set.words.every((x) => x.passed)) {
+    set.phase = "review";
+    for (const x of set.words) {
+      x.passed = false;
+      x.phaseAsks = 0;
+      x.dueAt = 0;
+    }
+  }
   return w;
 }
 
 export function setComplete(set: VoiceSet) {
-  return set.words.length > 0 && set.words.every(isMastered);
+  return set.phase === "review" && set.words.length > 0 && set.words.every((w) => w.passed);
 }
 
-export function masteredCount(set: VoiceSet) {
-  return set.words.filter(isMastered).length;
+/** Words cleared in the current round. */
+export function clearedCount(set: VoiceSet) {
+  return set.words.filter((w) => w.passed).length;
 }
 
 /**
- * Next word to ask: new words first, then the weakest; never the same word twice in a row when avoidable.
+ * Next word: a missed word whose retest is due, otherwise the next word not yet asked this round,
+ * otherwise the missed word that has waited longest. Never the same word twice in a row when avoidable.
  * `exclude` skips words whose grades are still being saved.
  */
 export function nextWord(set: VoiceSet, exclude?: string | ReadonlySet<string>): SetWord | null {
-  const skip = (slug: string) => (typeof exclude === "string" ? slug === exclude : exclude?.has(slug) ?? false);
-  const open = set.words.filter((w) => !isMastered(w) && !skip(w.slug));
+  const skip = (slug: string) => (typeof exclude === "string" ? slug === exclude : (exclude?.has(slug) ?? false));
+  const open = set.words.filter((w) => !w.passed && !skip(w.slug));
   if (!open.length) return null;
   const pool = open.length > 1 ? open.filter((w) => w.slug !== set.lastSlug) : open;
-  return [...pool].sort((a, b) => {
-    if ((a.asks === 0) !== (b.asks === 0)) return a.asks === 0 ? -1 : 1;
-    if (a.asks === 0) return 0;
-    return remaining(b) - remaining(a) || a.lastAskedAt - b.lastAskedAt;
-  })[0]!;
+  const due = pool.filter((w) => w.phaseAsks > 0 && w.dueAt <= set.clock).sort((a, b) => a.dueAt - b.dueAt);
+  if (due[0]) return due[0];
+  const fresh = pool.find((w) => w.phaseAsks === 0);
+  if (fresh) return fresh;
+  return [...pool].sort((a, b) => a.dueAt - b.dueAt)[0]!;
 }
 
 export type VoiceAnswer = { slug: string; verdict: Verdict; hintsUsed: number };
 
 /**
- * Rebuilds the learner's voice sets from their saved voice answers (oldest first), so a new call
- * picks up the same set where the last one stopped. Returns the current set and every word in
- * sets that were already completed.
+ * Rebuilds the learner's voice sets from saved voice answers (oldest first), for accounts that
+ * have no saved set yet. Returns the current set and every word in finished sets.
  */
 export function replaySets(answers: VoiceAnswer[]): { set: VoiceSet; finished: Set<string> } {
   const finished = new Set<string>();
   let set = newSet([], 1);
   for (const a of answers) {
     if (!set.words.some((w) => w.slug === a.slug)) {
-      // Words from a finished set may come up again in a later set's review; skip those answers.
       if (finished.has(a.slug) || set.words.length >= SET_SIZE) continue;
       set.words.push(blankWord(a.slug));
     }
     recordResult(set, a.slug, a.verdict, a.hintsUsed);
-    if (set.words.length >= SET_SIZE && setComplete(set)) {
+    if (setComplete(set)) {
       set.words.forEach((w) => finished.add(w.slug));
       set = newSet([], set.setNumber + 1);
     }

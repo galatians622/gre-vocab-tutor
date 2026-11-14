@@ -24,7 +24,15 @@ export const Route = createFileRoute("/_authenticated/voice")({
 
 type Line = { role: "you" | "tutor"; text: string };
 type Saved = { word: string; verdict: string; feedback: string };
-type Progress = { set_number: number; mastered: number; set_size: number; word: string | null; mode: "teach" | "review" };
+type Progress = {
+  set_number: number;
+  phase: "learn" | "review";
+  cleared: number;
+  set_size: number;
+  word: string | null;
+  mode: "teach" | "retest" | "review";
+};
+const MODE_LABEL = { teach: "New word", retest: "Trying again", review: "Reviewing" } as const;
 
 function Page() {
   const qc = useQueryClient();
@@ -101,10 +109,10 @@ function Page() {
       <PageHeader eyebrow="Practice out loud" title="Voice Tutor" />
       <div className="surface space-y-4 p-6">
         <p className="text-sm text-muted-foreground">
-          Just talk. Lexi leads the session through sets of 10 words: she breaks each new word into its roots and affixes and asks
-          what you think it means, walks you through the definition, and has you use it in a sentence. A word is mastered
-          once you define it correctly, with no hints, three times in a row. She won't move on until you've both stated the definition and used the word correctly in your own sentence. A new set starts once every word is mastered, and your
-          progress is saved as you go, so you can pick up where you left off. To finish, press End session or just tell Lexi you're done.
+          Just talk. Lexi works through sets of 10 words. She goes through each word once, starting from its roots. Get a word
+          right on the first try and it's cleared. Miss one and it comes back a few words later until you get it on the first try.
+          Once all 10 are cleared, she reviews the whole set one more time, then moves on to the next 10. Your place is saved,
+          so you can pick up where you left off. To finish, press End session or just tell Lexi you're done.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {!active ? (
@@ -135,15 +143,16 @@ function Page() {
           <div className="space-y-2 rounded-lg bg-secondary p-3">
             <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
               <span>
-                <span className="font-semibold">Set {progress.set_number}</span> · {progress.mastered} of {progress.set_size} mastered
+                <span className="font-semibold">Set {progress.set_number}</span> · {progress.phase === "learn" ? "First pass" : "Review round"}:{" "}
+                {progress.cleared} of {progress.set_size} cleared
               </span>
               {progress.word && (
                 <span className="text-muted-foreground">
-                  {progress.mode === "teach" ? "Learning" : "Reviewing"}: <span className="font-display text-base text-foreground">{progress.word}</span>
+                  {MODE_LABEL[progress.mode] ?? "Word"}: <span className="font-display text-base text-foreground">{progress.word}</span>
                 </span>
               )}
             </div>
-            <ProgressBar value={progress.set_size ? (progress.mastered / progress.set_size) * 100 : 0} />
+            <ProgressBar value={progress.set_size ? (progress.cleared / progress.set_size) * 100 : 0} />
           </div>
         )}
         {notice && <p className="rounded-lg bg-accent-soft p-3 text-sm">{notice}</p>}

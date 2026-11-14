@@ -3,20 +3,27 @@ import { gradeVoiceWord } from "./ai.server";
 import { applyReview, buildQueue, loadWordsWithParts, selectAll, wordReference, type WordWithParts } from "./learning.server";
 import { userClientFromToken, type DB } from "./supabase-user.server";
 import {
-  MASTERY_STREAK,
+  RETEST_GAP,
   SET_SIZE,
+  clearedCount,
   fillSet,
-  masteredCount,
   newSet,
   nextWord,
   recordResult,
-  remaining,
   replaySets,
   setComplete,
+  type Phase,
   type SetWord,
   type Verdict,
   type VoiceSet,
 } from "./voice-set";
+
+type Mode = "teach" | "retest" | "review";
+/** How the tutor should handle a word: teach it, retest a miss, or review it in the review round. */
+function modeFor(set: VoiceSet, entry: SetWord): Mode {
+  if (set.phase === "review") return "review";
+  return entry.phaseAsks === 0 ? "teach" : "retest";
+}
 
 type Learner = {
   db: DB;
@@ -33,7 +40,7 @@ type Learner = {
   correct: number;
 };
 /** The word the tutor is working on right now. */
-type CurrentWord = { slug: string; startIndex: number; quickCheck: boolean };
+type CurrentWord = { slug: string; startIndex: number; quickCheck: boolean; mode: Mode };
 type SavedAttempt = { word: string; verdict: string; feedback: string };
 
 export type LiveConfig = {
@@ -155,20 +162,18 @@ const conversationInstructions = `You are Lexi, a warm, encouraging GRE vocabula
 You silently receive a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies, and never read the briefing's labels aloud. Right after each briefing you get a short line introducing the word: say it right away.
 
 MODE TEACH (first time with this word):
-1. Lead with the roots. Say the word clearly, break it into its parts from the briefing and give each part's meaning, then ask: "Given those pieces, what do you think it means?" For example: "Benevolent. Bene means well, vol means wish, and ent makes it describe a person. Put those together. What do you think it means?" Never give the definition first. If the briefing lists no word parts, say so briefly and ask what they think it means.
-2. If they are unsure or only partly right, nudge them to connect the pieces (for example: "So someone who wishes others well is...?") and let them try again. Give at most two extra clues.
-3. Tell them honestly how they did: confirm what was right, correct what was off, then give the verified definition and read the example sentence. Point out exactly how each part builds the meaning.
-4. Ask them to say the definition back in their own words. It must capture the core meaning.
-5. Ask them to use the word in their own sentence. If it misuses the word, explain why and ask for another. If you are still not sure they understand, check another way, such as a quick scenario or asking for an opposite.
-6. Delegate only after the learner has BOTH stated the definition correctly AND used the word correctly in a sentence of their own.
+1. Lead with the roots. Say the word, give each part's meaning from the briefing, then ask: "Given those pieces, what do you think it means?" For example: "Benevolent. Bene means well, and vol means wish. Given those pieces, what do you think it means?" Never give the definition first. If the briefing lists no word parts, just ask what they think it means.
+2. If they are close, give at most one nudge to connect the pieces and let them try once more.
+3. Tell them honestly how they did, give the verified definition and read the example sentence, showing briefly how the parts build the meaning.
+4. Ask for one sentence of their own using the word. If it misuses the word, correct it in one line. Do not ask for another sentence.
+5. Delegate.
 
-MODE QUICK CHECK (a word they have seen before):
-1. Ask them to define it without giving the roots first. If they are stuck, remind them of the roots and ask what the pieces suggest.
-2. If they miss it, correct it with the verified definition and example and show how the roots build the meaning, then have them say the definition back correctly.
-3. Ask them to use it in a sentence. If the sentence is wrong, explain and ask for another.
-4. Delegate only after they have BOTH stated the definition correctly AND used the word correctly in a sentence.
+MODE RETEST (a word they missed a few words ago) and MODE REVIEW (the review round of the set):
+1. Ask them to define it, without giving the roots.
+2. If they get it right, give one or two words of praise and delegate right away. No sentence needed.
+3. If they miss it or are only partly right, give the verified definition and example with a one line root reminder, then delegate. Tell them it will come back in a few words.
 
-No skipping: never move on until both the definition and the sentence are correct. If the learner asks to skip or move on early, encourage them, give another clue or a simpler example, and keep working on the word together. Stay patient and upbeat.
+Don't make the learner repeat themselves: never ask them to say the definition back, never ask for more than one sentence, and never quiz the same word twice in a row. Each word should take well under a minute. If the learner asks to skip, give the definition and delegate; the word comes back later.
 
 Grading: judge every answer yourself against the verified definition and react right away. Never wait for the backend before giving feedback. Be honest: say clearly when an answer is partly right or wrong, and praise only correct answers.
 
@@ -177,16 +182,16 @@ Keep it flowing:
 - When you delegate, say only a very short bridge such as "Nice work." Do not say "let's move on" and then stop. The next word arrives within a second: introduce it immediately and ask your question, without waiting for the learner and without asking if they are ready.
 - Never pause the lesson or wait for permission to continue. Keep going word after word for as long as the learner is here.
 - Only stop when the learner says they want to stop, for example "I'm done for today" or "let's wrap up". Then give a one sentence summary of their progress from the briefing and end with the exact words "See you next time." Never say "See you next time" at any other moment.
-- Mention progress now and then using the briefing, for example "That's four of ten mastered."
+- Mention progress now and then using the briefing, for example "That's six of ten down."
 - If the learner goes off topic or asks a question, answer briefly, then return to the word.
 
-Set rules: words come in sets of 10. A word is mastered after the learner defines it correctly with no hints ${MASTERY_STREAK} times in a row. Missed words come back later in the set. A new set starts only when every word in the set is mastered.
+Set rules: words come in sets of 10. First you go through each word once. Getting a word right on the first try, with no hints, clears it. A missed word comes back about ${RETEST_GAP} words later until they get it right on the first try. Once all 10 are cleared, you review every word in the set once more, with the same rule for misses. Then the next set starts.
 
 Backchannel policy: Use moderate neutral listening sounds without taking over.
 Interruption policy: Stop your answer and listen when the learner interrupts.
 Delegation policy:
 Backend tools: Save the finished word's result to the learner's progress and return the briefing for the next word.
-Delegate to the backend when: The learner has correctly stated the definition AND correctly used the word in their own sentence. Never delegate before both are done, even if the learner asks to skip.
+Delegate to the backend when: You have finished the current word as described for its mode, or the learner asks to skip it.
 Do not delegate to the backend when: Greeting, giving hints, explaining, checking understanding, answering questions about the current word, or giving feedback. You already have every fact you need in the briefing.`;
 
 function isListeningSound(text: string) {
@@ -211,8 +216,9 @@ function cachedWords(db: DB) {
 
 /** What is saved in the voice session's `summary` column so the next call resumes the same set. */
 export type SavedSet = {
-  v: 1;
+  v: 2;
   set_number: number;
+  phase: Phase;
   words: SetWord[];
   clock: number;
   last_slug: string | null;
@@ -222,8 +228,9 @@ export type SavedSet = {
 
 export function encodeSet(learner: Pick<Learner, "set" | "finished">, current: string | null): string {
   const saved: SavedSet = {
-    v: 1,
+    v: 2,
     set_number: learner.set.setNumber,
+    phase: learner.set.phase,
     words: learner.set.words,
     clock: learner.set.clock,
     last_slug: learner.set.lastSlug,
@@ -233,27 +240,42 @@ export function encodeSet(learner: Pick<Learner, "set" | "finished">, current: s
   return JSON.stringify(saved);
 }
 
+type SavedWordV1 = { slug: string; asks?: number; streak?: number; firstTryCorrect?: boolean | null; lastAskedAt?: number };
+type SavedWord = Partial<SetWord> & SavedWordV1;
+
 export function decodeSet(summary: string | null | undefined, known: (slug: string) => boolean) {
   if (!summary) return null;
   try {
-    const saved = JSON.parse(summary) as SavedSet;
-    if (saved?.v !== 1 || !Array.isArray(saved.words) || typeof saved.set_number !== "number") return null;
-    const words = saved.words
+    const saved = JSON.parse(summary) as Omit<SavedSet, "v" | "words" | "phase"> & { v: number; words: SavedWord[]; phase?: Phase };
+    if ((saved?.v !== 1 && saved?.v !== 2) || !Array.isArray(saved.words) || typeof saved.set_number !== "number") return null;
+    const v1 = saved.v === 1;
+    const words: SetWord[] = saved.words
       .filter((w) => w && typeof w.slug === "string" && known(w.slug))
       .slice(0, SET_SIZE)
-      .map((w) => ({
-        slug: w.slug,
-        asks: Number(w.asks) || 0,
-        streak: Number(w.streak) || 0,
-        firstTryCorrect: typeof w.firstTryCorrect === "boolean" ? w.firstTryCorrect : null,
-        lastAskedAt: Number.isFinite(w.lastAskedAt) ? w.lastAskedAt : -1,
-      }));
+      .map((w) => {
+        const asks = Number(w.asks) || 0;
+        return {
+          slug: w.slug,
+          asks,
+          // Sets saved under the old three-in-a-row rule: a word answered right last time counts as cleared.
+          phaseAsks: v1 ? asks : Number(w.phaseAsks) || 0,
+          passed: v1 ? (Number(w.streak) || 0) >= 1 : w.passed === true,
+          dueAt: v1 ? 0 : Number(w.dueAt) || 0,
+          firstTryCorrect: typeof w.firstTryCorrect === "boolean" ? w.firstTryCorrect : null,
+          lastAskedAt: Number.isFinite(w.lastAskedAt) ? Number(w.lastAskedAt) : -1,
+        };
+      });
     const set: VoiceSet = {
       words,
       clock: Number(saved.clock) || 0,
       lastSlug: typeof saved.last_slug === "string" ? saved.last_slug : null,
       setNumber: saved.set_number,
+      phase: saved.phase === "review" ? "review" : "learn",
     };
+    if (set.phase === "learn" && words.length >= SET_SIZE && words.every((w) => w.passed)) {
+      set.phase = "review";
+      for (const w of words) Object.assign(w, { passed: false, phaseAsks: 0, dueAt: 0 });
+    }
     const finished = new Set((Array.isArray(saved.finished) ? saved.finished : []).filter((x) => typeof x === "string"));
     const current = typeof saved.current === "string" && words.some((w) => w.slug === saved.current) ? saved.current : null;
     return { set, finished, current };
@@ -341,9 +363,11 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
   const set = learner.set;
   const lines = [
     "WORD BRIEFING (silent reference facts for you; never read these labels aloud)",
-    entry.asks === 0
-      ? "Mode: TEACH. First time with this word."
-      : `Mode: QUICK CHECK. Seen ${entry.asks} time${entry.asks === 1 ? "" : "s"} before.`,
+    {
+      teach: "Mode: TEACH. First time with this word.",
+      retest: "Mode: RETEST. They missed this word a few words ago.",
+      review: "Mode: REVIEW. Review round of this set.",
+    }[modeFor(set, entry)],
     `Word: ${word.word} (${word.part_of_speech})`,
     `Definition: ${word.definition}`,
     `Plain English: ${word.plain_english}`,
@@ -358,16 +382,17 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
   if (word.etymology) lines.push(`Etymology: ${word.etymology}`);
   if (word.confused_note) lines.push(`Commonly confused: ${word.confused_note}`);
   lines.push(
-    `Progress: set ${set.setNumber}, ${masteredCount(set)} of ${set.words.length} words mastered. ` +
-      `This word needs ${remaining(entry)} more clean correct answer${remaining(entry) === 1 ? "" : "s"}.`,
+    `Progress: set ${set.setNumber}, ${set.phase === "learn" ? "first pass" : "review round"}: ` +
+      `${clearedCount(set)} of ${set.words.length} words cleared. Right on the first try clears this word.`,
   );
   if (note) lines.push(note);
   return lines.join("\n");
 }
 
 /** A short, natural line for the tutor to say aloud to introduce a word. */
-export function spokenIntro(word: WordWithParts, entry: SetWord, lead = "Next word:") {
-  if (entry.asks > 0) return `Quick review: ${word.word}. What does ${word.word} mean?`;
+export function spokenIntro(word: WordWithParts, mode: Mode, lead = "Next word:") {
+  if (mode === "retest") return `Let's try ${word.word} again. What does ${word.word} mean?`;
+  if (mode === "review") return `${lead === "Next word:" ? "Review:" : lead} ${word.word}. What does it mean?`;
   const parts = word.parts.map((p) => `${p.surface} means "${p.root.meaning}"`);
   if (!parts.length) return `${lead} ${word.word}. What do you think ${word.word} means?`;
   return `${lead} ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
@@ -540,10 +565,11 @@ export function bindLiveConnection(
       type: "app.voice.progress",
       progress: {
         set_number: learner.set.setNumber,
-        mastered: masteredCount(learner.set),
+        phase: learner.set.phase,
+        cleared: clearedCount(learner.set),
         set_size: learner.set.words.length,
         word: word?.word ?? null,
-        mode: current?.quickCheck ? "review" : "teach",
+        mode: current?.mode ?? "teach",
       },
     });
   }
@@ -551,10 +577,11 @@ export function bindLiveConnection(
   /** Makes `entry` the current word and returns its briefing and spoken introduction. */
   function startWord(entry: SetWord, note?: string, lead?: string) {
     const word = learner!.words.get(entry.slug)!;
-    current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: entry.asks > 0 };
+    const mode = modeFor(learner!.set, entry);
+    current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: mode !== "teach", mode };
     emitProgress();
     saveState();
-    return { brief: briefing(learner!, word, entry, note), spoken: spokenIntro(word, entry, lead) };
+    return { brief: briefing(learner!, word, entry, note), spoken: spokenIntro(word, mode, lead) };
   }
 
   function requestGreeting() {
@@ -732,8 +759,11 @@ export function bindLiveConnection(
       await topUpSet(active);
       if (closing) return;
       pick = nextWord(active.set);
-      note = `The learner just mastered every word in set ${active.set.setNumber - 1}.`;
-      lead = `You've mastered every word in set ${active.set.setNumber - 1}! On to set ${active.set.setNumber}. First word:`;
+      note = `The learner just finished set ${active.set.setNumber - 1}, review round included.`;
+      lead = `That's set ${active.set.setNumber - 1} done, review and all! On to set ${active.set.setNumber}. First word:`;
+    } else if (pick && active.set.phase === "review" && active.set.words.every((w) => w.phaseAsks === 0)) {
+      note = "The learner just cleared all 10 words on the first pass. The review round starts now.";
+      lead = "That's all ten words! Now a quick review of the whole set. First:";
     }
     if (!pick) {
       return deliver(id, "There are no more words available right now. Congratulate the learner on their progress and wrap up the session.");
@@ -770,18 +800,19 @@ export function bindLiveConnection(
       ) {
         if (greetingCommand.type === "instructions") {
           greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
-          const resume = learner!.set.words.find((w) => w.slug === learner!.resumeSlug && w.streak < MASTERY_STREAK);
+          const resume = learner!.set.words.find((w) => w.slug === learner!.resumeSlug && !w.passed);
           const first = resume ?? nextWord(learner!.set);
           if (first) {
             const resuming = learner!.set.words.some((w) => w.asks > 0);
-            const done = masteredCount(learner!.set);
+            const done = clearedCount(learner!.set);
+            const round = learner!.set.phase === "learn" ? "on the first pass" : "in the review round";
             const word = startWord(
               first,
               resuming ? "The learner is resuming this set from an earlier session." : undefined,
               resume ? "Let's go back to" : "First word:",
             );
             const hello = resuming
-              ? `Welcome back! Let's pick up set ${learner!.set.setNumber} right where you left off. You've mastered ${done} of ${learner!.set.words.length} words so far.`
+              ? `Welcome back! Let's pick up set ${learner!.set.setNumber} right where you left off. You've cleared ${done} of ${learner!.set.words.length} words ${round} so far.`
               : "Hi, I'm Lexi, your GRE vocabulary tutor. We'll work through a set of 10 words together until each one sticks.";
             sendWord(null, word.brief, `${hello} ${word.spoken}`, greetingCommand.id);
           } else {
