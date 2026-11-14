@@ -84,9 +84,9 @@ async function startCall() {
   return { browser, gateway };
 }
 
-function commentary(gateway: { sent: string[] }, delegation: string | null) {
+function commentary(gateway: { sent: string[] }, delegation: string | null, kind = "commentary") {
   return parsed(gateway)
-    .filter((e) => e.type === "session.commentary.append" && e.delegation_id === delegation)
+    .filter((e) => e.type === `session.${kind}.append` && e.delegation_id === delegation)
     .map((e) => e.content)
     .join("");
 }
@@ -99,10 +99,13 @@ afterEach(() => {
 describe("voice relay", () => {
   it("briefs the tutor on the first word in the greeting", async () => {
     const { gateway } = await startCall();
-    const text = commentary(gateway, null);
-    expect(text).toContain("Word: word0");
-    expect(text).toContain("Definition: meaning 0");
-    expect(text).toContain("Mode: TEACH");
+    const facts = commentary(gateway, null, "thinking");
+    expect(facts).toContain("Word: word0");
+    expect(facts).toContain("Definition: meaning 0");
+    expect(facts).toContain("Mode: TEACH");
+    const spoken = commentary(gateway, null);
+    expect(spoken).toContain("First word: word0");
+    expect(spoken).not.toContain("Definition:");
   });
 
   it("saves the grade after the tutor moves on", async () => {
@@ -113,6 +116,30 @@ describe("voice relay", () => {
     expect(reviews).toEqual([expect.objectContaining({ itemId: "id0", skill: "recall", verdict: "correct" })]);
     expect(parsed(browser).some((e) => e.type === "app.voice.saved")).toBe(true);
   });
+
+  it("nudges the tutor if it goes quiet after a new word", async () => {
+    const { gateway } = await startCall();
+    gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning zero", start_ms: 1 });
+    gateway.push({ type: "session.delegation.created", delegation: { id: "d1", target: "client" } });
+    await tick(5200);
+    const nudges = parsed(gateway).filter((e) => e.type === "session.instructions.append" && e.content.includes("word1"));
+    expect(nudges).toHaveLength(1);
+  }, 10_000);
+
+  it("does not nudge once the tutor is talking", async () => {
+    const { gateway } = await startCall();
+    gateway.push({ type: "session.output_transcript.delta", delta: "Hi, first word", start_ms: 1 });
+    await tick(5200);
+    expect(parsed(gateway).filter((e) => e.type === "session.instructions.append")).toHaveLength(1); // greeting only
+  }, 10_000);
+
+  it("ends the call after the tutor signs off", async () => {
+    const { gateway, browser } = await startCall();
+    gateway.push({ type: "session.output_transcript.delta", delta: "Great work today. See you next ", start_ms: 1 });
+    gateway.push({ type: "session.output_transcript.delta", delta: "time.", start_ms: 2 });
+    await tick(4100);
+    expect(parsed(browser).some((e) => e.type === "app.voice.finished")).toBe(true);
+  }, 10_000);
 
   it("does not move on before the learner has answered", async () => {
     const { gateway } = await startCall();
@@ -127,7 +154,8 @@ describe("voice relay", () => {
     gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning zero", start_ms: 1 });
     gateway.push({ type: "session.delegation.created", delegation: { id: "d1", target: "client" } });
     await tick(5);
-    expect(commentary(gateway, "d1")).toContain("Word: word1");
+    expect(commentary(gateway, "d1", "thinking")).toContain("Word: word1");
+    expect(commentary(gateway, "d1")).toContain("Next word: word1");
     expect(reviews).toHaveLength(0); // still grading, the learner did not wait
   });
 

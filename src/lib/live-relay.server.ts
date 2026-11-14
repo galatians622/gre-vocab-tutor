@@ -44,7 +44,7 @@ const liveSettings = {
   liveModel: "openai/gpt-live-1",
   backendModel: "openai/gpt-6-astra",
   openingInstructions:
-    "Greet the learner warmly and briefly as Lexi, their GRE vocabulary tutor. In one sentence say you'll work through a set of 10 words together until each one sticks. Then go straight into the first word from the word briefing.",
+    "Greet the learner warmly and briefly as Lexi, their GRE vocabulary tutor. In one sentence say you'll work through a set of 10 words together until each one sticks. Then go straight into the first word and ask your first question.",
 };
 
 export type LiveSocket = {
@@ -146,7 +146,7 @@ export function handleLiveRequest(request: Request): Response {
 
 const conversationInstructions = `You are Lexi, a warm, encouraging GRE vocabulary tutor speaking English. You lead the session like a great private tutor. The learner should never have to tell you to continue.
 
-You get a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies, and never read the briefing's labels aloud.
+You silently receive a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies, and never read the briefing's labels aloud. Right after each briefing you get a short line introducing the word: say it right away.
 
 MODE TEACH (first time with this word):
 1. Lead with the roots. Say the word clearly, break it into its parts from the briefing and give each part's meaning, then ask: "Given those pieces, what do you think it means?" For example: "Benevolent. Bene means well, vol means wish, and ent makes it describe a person. Put those together. What do you think it means?" Never give the definition first. If the briefing lists no word parts, say so briefly and ask what they think it means.
@@ -168,7 +168,9 @@ Grading: judge every answer yourself against the verified definition and react r
 
 Keep it flowing:
 - Keep each reply short: one or two sentences and one question at a time.
-- When you delegate, say a short bridge such as "Nice work, let's keep going." The next briefing arrives in a moment. Introduce the next word as soon as it arrives, without waiting for the learner and without asking if they are ready.
+- When you delegate, say only a very short bridge such as "Nice work." Do not say "let's move on" and then stop. The next word arrives within a second: introduce it immediately and ask your question, without waiting for the learner and without asking if they are ready.
+- Never pause the lesson or wait for permission to continue. Keep going word after word for as long as the learner is here.
+- Only stop when the learner says they want to stop, for example "I'm done for today" or "let's wrap up". Then give a one sentence summary of their progress from the briefing and end with the exact words "See you next time." Never say "See you next time" at any other moment.
 - Mention progress now and then using the briefing, for example "That's four of ten mastered."
 - If the learner goes off topic or asks a question, answer briefly, then return to the word.
 
@@ -251,7 +253,7 @@ async function topUpSet(learner: Learner) {
 function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: string) {
   const set = learner.set;
   const lines = [
-    "WORD BRIEFING (verified facts for you only; do not read these labels aloud)",
+    "WORD BRIEFING (silent reference facts for you; never read these labels aloud)",
     entry.asks === 0
       ? "Mode: TEACH. First time with this word."
       : `Mode: QUICK CHECK. Seen ${entry.asks} time${entry.asks === 1 ? "" : "s"} before.`,
@@ -274,6 +276,14 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
   );
   if (note) lines.push(note);
   return lines.join("\n");
+}
+
+/** A short, natural line for the tutor to say aloud to introduce a word. */
+export function spokenIntro(word: WordWithParts, entry: SetWord, lead = "Next word") {
+  if (entry.asks > 0) return `Quick review: ${word.word}. What does ${word.word} mean?`;
+  const parts = word.parts.map((p) => `${p.surface} means "${p.root.meaning}"`);
+  if (!parts.length) return `${lead}: ${word.word}. What do you think ${word.word} means?`;
+  return `${lead}: ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
 }
 
 function transcriptText(items: Transcript[]) {
@@ -337,6 +347,9 @@ export function bindLiveConnection(
   /** Grades still being saved, by word slug. */
   const grading = new Map<string, Promise<void>>();
   let delegationChain: Promise<void> = Promise.resolve();
+  let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
+  let recentTutorText = "";
+  let signedOff = false;
   let greetingRequested = false;
   let greetingCommand: { id: string; type: "instructions" | "commentary" } | undefined;
   let greetingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -370,18 +383,46 @@ export function bindLiveConnection(
     greetingCommand = undefined;
   }
 
-  function sendCommentary(delegationID: string | null, content: string, lastEventID?: string) {
+  function sendCommentary(delegationID: string | null, content: string, lastEventID?: string, kind: "commentary" | "thinking" = "commentary") {
     const chunks = [...commentaryChunks(content)];
     chunks.forEach((chunk, i) => {
       gateway?.send(
         JSON.stringify({
-          type: "session.commentary.append",
+          type: `session.${kind}.append`,
           event_id: i === chunks.length - 1 && lastEventID ? lastEventID : crypto.randomUUID(),
           delegation_id: delegationID,
           content: chunk,
         }),
       );
     });
+  }
+
+  /** Gives the tutor a word: the facts silently, then a short line to say aloud right away. */
+  function sendWord(delegationID: string | null, brief: string, spoken: string, lastEventID?: string) {
+    sendCommentary(delegationID, brief, undefined, "thinking");
+    sendCommentary(delegationID, spoken, lastEventID);
+    armNudge(spoken);
+  }
+
+  /**
+   * Backup in case the tutor still goes quiet after getting a new word: if nobody has spoken a few
+   * seconds later, tell it to carry on.
+   */
+  function armNudge(spoken: string) {
+    clearTimeout(nudgeTimer);
+    nudgeTimer = setTimeout(() => {
+      if (closing || gateway?.readyState !== 1) return;
+      const content = `Keep the lesson moving without waiting for the learner. Say this now: ${spoken}`;
+      const bytes = new TextEncoder().encode(content);
+      gateway.send(
+        JSON.stringify({
+          type: "session.instructions.append",
+          event_id: crypto.randomUUID(),
+          delegation_id: null,
+          content: bytes.length > 480 ? new TextDecoder().decode(bytes.slice(0, 470)).replace(/\uFFFD$/, "") : content,
+        }),
+      );
+    }, 5000);
   }
 
   function emitProgress() {
@@ -399,12 +440,12 @@ export function bindLiveConnection(
     });
   }
 
-  /** Makes `entry` the current word and returns its briefing for the tutor. */
-  function startWord(entry: SetWord, note?: string) {
+  /** Makes `entry` the current word and returns its briefing and spoken introduction. */
+  function startWord(entry: SetWord, note?: string, lead?: string) {
     const word = learner!.words.get(entry.slug)!;
     current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: entry.asks > 0 };
     emitProgress();
-    return briefing(learner!, word, entry, note);
+    return { brief: briefing(learner!, word, entry, note), spoken: spokenIntro(word, entry, lead) };
   }
 
   function requestGreeting() {
@@ -439,6 +480,7 @@ export function bindLiveConnection(
     clearTimeout(startTimer);
     clearTimeout(startupTimer);
     clearTimeout(closeTimer);
+    clearTimeout(nudgeTimer);
     clearGreeting();
     setupAbort.abort();
     close(gateway);
@@ -451,6 +493,7 @@ export function bindLiveConnection(
     closing = true;
     clearTimeout(startupTimer);
     clearTimeout(startTimer);
+    clearTimeout(nudgeTimer);
     clearGreeting();
     if (gateway?.readyState === 1) {
       execution.waitUntil(
@@ -568,18 +611,27 @@ export function bindLiveConnection(
       pick = nextWord(active.set);
     }
     let note: string | undefined;
+    let lead: string | undefined;
     if (!pick && setComplete(active.set)) {
       active.set.words.forEach((w) => active.finished.add(w.slug));
       active.set = newSet([], active.set.setNumber + 1);
       await topUpSet(active);
       if (closing) return;
       pick = nextWord(active.set);
-      note = `The learner just mastered every word in set ${active.set.setNumber - 1}. Congratulate them warmly, then start set ${active.set.setNumber} with this word.`;
+      note = `The learner just mastered every word in set ${active.set.setNumber - 1}.`;
+      lead = `You've mastered every word in set ${active.set.setNumber - 1}! On to set ${active.set.setNumber}. First word`;
     }
     if (!pick) {
       return deliver(id, "There are no more words available right now. Congratulate the learner on their progress and wrap up the session.");
     }
-    deliver(id, startWord(pick, note ?? "Introduce this word now."));
+    const next = startWord(pick, note, lead);
+    if (closing) return;
+    if (gateway?.readyState !== 1) return stop();
+    try {
+      sendWord(id, next.brief, next.spoken);
+    } catch {
+      stop();
+    }
   }
 
   function receiveGateway(data: unknown) {
@@ -605,10 +657,16 @@ export function bindLiveConnection(
         if (greetingCommand.type === "instructions") {
           greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
           const first = nextWord(learner!.set);
-          const brief = first
-            ? startWord(first, learner!.set.words.some((w) => w.asks > 0) ? "The learner is resuming this set from an earlier session." : undefined)
-            : "There are no words available right now. Apologize briefly.";
-          sendCommentary(null, `${brief}\n\nBegin the conversation now, following the instructions provided.`, greetingCommand.id);
+          if (first) {
+            const resuming = learner!.set.words.some((w) => w.asks > 0);
+            const word = startWord(first, resuming ? "The learner is resuming this set from an earlier session." : undefined, "First word");
+            const hello = resuming
+              ? `Welcome back! I'm Lexi. Let's pick up your set ${learner!.set.setNumber} where you left off.`
+              : "Hi, I'm Lexi, your GRE vocabulary tutor. We'll work through a set of 10 words together until each one sticks.";
+            sendWord(null, word.brief, `${hello} ${word.spoken}`, greetingCommand.id);
+          } else {
+            sendCommentary(null, "Greet the learner and say there are no words available right now.", greetingCommand.id);
+          }
         } else {
           clearGreeting();
           emit({ type: "app.greeting.accepted" });
@@ -620,6 +678,15 @@ export function bindLiveConnection(
       if (event.type === "session.input_transcript.delta" || event.type === "session.output_transcript.delta") {
         const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
         if (!event.delta?.trim()) return;
+        if (role === "assistant" || !isListeningSound(event.delta)) clearTimeout(nudgeTimer);
+        if (role === "assistant") {
+          recentTutorText = (recentTutorText + event.delta).slice(-200);
+          if (!signedOff && /see you next time/i.test(recentTutorText)) {
+            signedOff = true;
+            // Let the goodbye finish playing, then end the call.
+            setTimeout(() => emit({ type: "app.voice.finished" }), 4000);
+          }
+        }
         transcripts.push({
           role,
           text: event.delta,

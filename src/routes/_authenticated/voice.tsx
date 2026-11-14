@@ -35,6 +35,7 @@ function Page() {
   const [notice, setNotice] = useState<string | null>(null);
   const lastRole = useRef<Line["role"] | null>(null);
   const answerCount = useRef(0);
+  const stopCall = useRef<() => void>(() => undefined);
 
   const onEvent = useCallback(
     (e: LiveEvent) => {
@@ -61,6 +62,9 @@ function Page() {
         });
       } else if (e.type === "app.delegation.pending") {
         setThinking(true);
+      } else if (e.type === "app.voice.finished") {
+        // The learner said they were done and Lexi said goodbye.
+        stopCall.current();
       } else if (e.type === "app.voice.progress") {
         setProgress(e["progress"] as Progress);
       } else if (e.type === "app.voice.save_failed") {
@@ -79,6 +83,7 @@ function Page() {
 
   const getToken = useCallback(async () => (await supabase.auth.getSession()).data.session?.access_token ?? null, []);
   const call = useLiveVoice({ onEvent, getToken });
+  stopCall.current = call.stop;
   const active = call.status === "connecting" || call.status === "connected";
 
   const begin = () => {
@@ -99,7 +104,7 @@ function Page() {
           Just talk. Lexi leads the session through sets of 10 words: she breaks each new word into its roots and affixes and asks
           what you think it means, walks you through the definition, and has you use it in a sentence. A word is mastered
           once you define it correctly, with no hints, three times in a row. She won't move on until you've both stated the definition and used the word correctly in your own sentence. A new set starts once every word is mastered, and your
-          progress is saved as you go, so you can pick up where you left off.
+          progress is saved as you go, so you can pick up where you left off. To finish, press End session or just tell Lexi you're done.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {!active ? (
