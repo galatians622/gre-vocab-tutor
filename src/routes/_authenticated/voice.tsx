@@ -26,13 +26,12 @@ type Line = { role: "you" | "tutor"; text: string };
 type Saved = { word: string; verdict: string; feedback: string };
 type Progress = {
   set_number: number;
-  phase: "learn" | "review";
-  cleared: number;
+  done: number;
   set_size: number;
   word: string | null;
   mode: "teach" | "retest" | "review";
 };
-const MODE_LABEL = { teach: "New word", retest: "Trying again", review: "Reviewing" } as const;
+const MODE_LABEL = { teach: "New word", retest: "Trying again", review: "Quick check" } as const;
 
 function Page() {
   const qc = useQueryClient();
@@ -109,10 +108,11 @@ function Page() {
       <PageHeader eyebrow="Practice out loud" title="Voice Tutor" />
       <div className="surface space-y-4 p-6">
         <p className="text-sm text-muted-foreground">
-          Just talk. Lexi works through sets of 10 words. She goes through each word once, starting from its roots. Get a word
-          right on the first try and it's cleared. Miss one and it comes back a few words later until you get it on the first try.
-          Once all 10 are cleared, she reviews the whole set one more time, then moves on to the next 10. Your place is saved,
-          so you can pick up where you left off. To finish, press End session or just tell Lexi you're done.
+          Just talk. Lexi keeps the words coming in sets of 10 different words, starting each new word from its roots. Get one
+          right and she checks it once more a few words later, then it's done. Miss one and it comes back a few words later; get
+          it right once and it's done. If you miss it twice, it moves to the next set instead of holding you up. Each set also
+          mixes in a couple of older words. Lexi moves to the next word on her own. Your place is saved, so you can pick up where
+          you left off. To finish, press End session or just tell Lexi you're done.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {!active ? (
@@ -143,8 +143,7 @@ function Page() {
           <div className="space-y-2 rounded-lg bg-secondary p-3">
             <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
               <span>
-                <span className="font-semibold">Set {progress.set_number}</span> · {progress.phase === "learn" ? "First pass" : "Review round"}:{" "}
-                {progress.cleared} of {progress.set_size} cleared
+                <span className="font-semibold">Set {progress.set_number}</span>: {progress.done} of {progress.set_size} done
               </span>
               {progress.word && (
                 <span className="text-muted-foreground">
@@ -152,7 +151,7 @@ function Page() {
                 </span>
               )}
             </div>
-            <ProgressBar value={progress.set_size ? (progress.cleared / progress.set_size) * 100 : 0} />
+            <ProgressBar value={progress.set_size ? (progress.done / progress.set_size) * 100 : 0} />
           </div>
         )}
         {notice && <p className="rounded-lg bg-accent-soft p-3 text-sm">{notice}</p>}

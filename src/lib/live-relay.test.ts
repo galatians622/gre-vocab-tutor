@@ -54,6 +54,7 @@ vi.mock("./learning.server", () => ({
   loadWordsWithParts: async () => words,
   selectAll: async () => [],
   buildQueue: async () => ({ items: [] }),
+  loadStates: async () => [],
   wordReference: (w: { word: string }) => `Word: ${w.word}`,
   applyReview: async (_db: unknown, _u: string, input: { itemId: string; skill: string; verdict: string }) => {
     reviews.push(input);
@@ -161,7 +162,7 @@ describe("voice relay", () => {
 
   it("does not nudge once the tutor is talking", async () => {
     const { gateway } = await startCall();
-    gateway.push({ type: "session.output_transcript.delta", delta: "Hi, first word", start_ms: 1 });
+    gateway.push({ type: "session.output_transcript.delta", delta: "Hi! First word: word0. What do you think it means?", start_ms: 1 });
     await tick(5200);
     expect(parsed(gateway).filter((e) => e.type === "session.instructions.append")).toHaveLength(1); // greeting only
   }, 10_000);
@@ -190,15 +191,80 @@ describe("voice relay", () => {
     const resumed = JSON.parse(sessionRows.at(-1)!.summary!);
     expect(resumed.words.map((w: { slug: string }) => w.slug)).toEqual(saved.words.map((w: { slug: string }) => w.slug));
     expect(resumed.words[0].asks).toBe(1);
-    expect(resumed.words[0].passed).toBe(true);
+    expect(resumed.words[0].status).toBe("check");
   });
 
   it("converts sets saved under the old three-in-a-row rule", () => {
     const words = Array.from({ length: 10 }, (_, i) => ({ slug: `w${i}`, asks: 4, streak: i < 5 ? 1 : 0, firstTryCorrect: false, lastAskedAt: i }));
     const decoded = decodeSet(JSON.stringify({ v: 1, set_number: 1, words, clock: 40, last_slug: "w9", current: "w5", finished: [] }), () => true)!;
-    expect(decoded.set.phase).toBe("learn");
-    expect(decoded.set.words.filter((w) => w.passed)).toHaveLength(5);
+    expect(decoded.set.words.filter((w) => w.status === "done")).toHaveLength(5);
+    expect(decoded.set.words.filter((w) => w.status === "retry")).toHaveLength(5);
     expect(decoded.current).toBe("w5");
+  });
+
+  it("converts sets saved under the review-round rule and drops duplicate words", () => {
+    const words = [
+      { slug: "w0", asks: 2, phaseAsks: 1, passed: true },
+      { slug: "w1", asks: 3, phaseAsks: 2, passed: false },
+      { slug: "w1", asks: 3, phaseAsks: 2, passed: false },
+      { slug: "w2", asks: 1, phaseAsks: 0, passed: false },
+    ];
+    const decoded = decodeSet(JSON.stringify({ v: 2, phase: "review", set_number: 3, words, clock: 9, last_slug: "w0", current: "w2", finished: [] }), () => true)!;
+    expect(decoded.set.words.map((w) => [w.slug, w.status])).toEqual([["w0", "done"], ["w1", "retry"], ["w2", "done"]]);
+    expect(decoded.current).toBeNull();
+  });
+
+  it("keeps nudging after a short bridge until the tutor says the new word", async () => {
+    const { gateway } = await startCall();
+    gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning zero", start_ms: 1 });
+    gateway.push({ type: "session.delegation.created", delegation: { id: "d1", target: "client" } });
+    await tick(5);
+    gateway.push({ type: "session.output_transcript.delta", delta: "Nice work.", start_ms: 2 }); // bridge, then silence
+    await tick(4200);
+    const nudges = parsed(gateway).filter((e) => e.type === "session.instructions.append" && e.content.includes("word1"));
+    expect(nudges).toHaveLength(1);
+  }, 10_000);
+
+  it("prompts the tutor to carry on if it goes quiet without a question", async () => {
+    const { gateway } = await startCall();
+    gateway.push({ type: "session.output_transcript.delta", delta: "First word: word0. What do you think it means?", start_ms: 1 });
+    gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning zero", start_ms: 2 });
+    gateway.push({ type: "session.output_transcript.delta", delta: "Exactly right. Let's move on.", start_ms: 3 });
+    await tick(6200);
+    const prompts = parsed(gateway).filter((e) => e.type === "session.instructions.append" && e.content.includes("delegate"));
+    expect(prompts).toHaveLength(1);
+  }, 10_000);
+
+  it("leaves the learner to think after a question", async () => {
+    const { gateway } = await startCall();
+    gateway.push({ type: "session.output_transcript.delta", delta: "First word: word0. What do you think it means?", start_ms: 1 });
+    await tick(6200);
+    expect(parsed(gateway).filter((e) => e.type === "session.instructions.append")).toHaveLength(1); // greeting only
+  }, 10_000);
+
+  it("starts the next set without waiting for the last grade", async () => {
+    const set = Array.from({ length: 10 }, (_, i) => ({
+      slug: `w${i}`,
+      status: i === 9 ? "check" : "done",
+      asks: 1,
+      misses: 0,
+      dueAt: 0,
+      firstTryCorrect: true,
+      lastAskedAt: i,
+      carries: 0,
+    }));
+    sessionRows.push({ summary: JSON.stringify({ v: 3, set_number: 1, words: set, clock: 10, last_slug: "w8", current: "w9", finished: [], carry: [] }) });
+    gradeDelay = 5000;
+    const { gateway } = await startCall();
+    expect(commentary(gateway, null)).toContain("Let's go back to word9");
+    gateway.push({ type: "session.input_transcript.delta", delta: "it means meaning nine", start_ms: 1 });
+    gateway.push({ type: "session.delegation.created", delegation: { id: "d1", target: "client" } });
+    await tick(20);
+    expect(commentary(gateway, "d1")).toContain("set 1 done");
+    expect(commentary(gateway, "d1")).toMatch(/word1[01]/);
+    const saved = JSON.parse(sessionRows.at(-1)!.summary!);
+    expect(saved.set_number).toBe(2);
+    expect(new Set(saved.words.map((w: { slug: string }) => w.slug)).size).toBe(saved.words.length);
   });
 
   it("does not move on before the learner has answered", async () => {

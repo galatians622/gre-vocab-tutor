@@ -1,37 +1,48 @@
 import process from "node:process";
 import { gradeVoiceWord } from "./ai.server";
-import { applyReview, buildQueue, loadWordsWithParts, selectAll, wordReference, type WordWithParts } from "./learning.server";
+import { applyReview, buildQueue, loadStates, loadWordsWithParts, selectAll, wordReference, type WordWithParts } from "./learning.server";
 import { userClientFromToken, type DB } from "./supabase-user.server";
 import {
+  MAX_CARRIES,
   RETEST_GAP,
   SET_SIZE,
-  clearedCount,
-  fillSet,
-  newSet,
+  addWord,
+  blankWord,
+  doneCount,
+  isClean,
+  isOpen,
+  nextSet,
   nextWord,
   recordResult,
   replaySets,
   setComplete,
-  type Phase,
+  spacedDue,
   type SetWord,
+  type Status,
   type Verdict,
   type VoiceSet,
 } from "./voice-set";
 
 type Mode = "teach" | "retest" | "review";
-/** How the tutor should handle a word: teach it, retest a miss, or review it in the review round. */
-function modeFor(set: VoiceSet, entry: SetWord): Mode {
-  if (set.phase === "review") return "review";
-  return entry.phaseAsks === 0 ? "teach" : "retest";
+/** How the tutor should handle a word: teach a new word, retest a miss, or quickly check a word. */
+function modeFor(entry: SetWord): Mode {
+  if (entry.status === "new") return "teach";
+  return entry.status === "retry" ? "retest" : "review";
 }
+/** Seen-before words mixed into each new set so older words keep coming back. */
+const REVIEWS_PER_SET = 2;
+/** Most older words (reviews plus words carried over) in one set of 10. */
+const MAX_OLDER_PER_SET = 4;
 
 type Learner = {
   db: DB;
   userId: string;
   words: Map<string, WordWithParts>;
   set: VoiceSet;
-  /** Words from sets the learner already finished; never reused in a new set. */
+  /** Words from sets the learner already finished; never reused as new words. */
   finished: Set<string>;
+  /** Missed words whose grade landed after their set ended; they join the next set. */
+  carry: { slug: string; carries: number }[];
   /** This call's study_sessions row, which also stores the set so the next call resumes it. */
   sessionId: string | null;
   /** Word the learner was on when the last call ended. */
@@ -57,7 +68,7 @@ const liveSettings = {
   liveModel: "openai/gpt-live-1",
   backendModel: "openai/gpt-6-astra",
   openingInstructions:
-    "Greet the learner warmly and briefly as Lexi, their GRE vocabulary tutor. In one sentence say you'll work through a set of 10 words together until each one sticks. Then go straight into the first word and ask your first question.",
+    "Greet the learner warmly and briefly as Lexi, their GRE vocabulary tutor. In one sentence say you'll get through as many words as you can together. Then go straight into the first word and ask your first question.",
 };
 
 export type LiveSocket = {
@@ -163,29 +174,28 @@ You silently receive a WORD BRIEFING for every word. It holds the verified defin
 
 MODE TEACH (first time with this word):
 1. Lead with the roots. Say the word, give each part's meaning from the briefing, then ask: "Given those pieces, what do you think it means?" For example: "Benevolent. Bene means well, and vol means wish. Given those pieces, what do you think it means?" Never give the definition first. If the briefing lists no word parts, just ask what they think it means.
-2. If they are close, give at most one nudge to connect the pieces and let them try once more.
-3. Tell them honestly how they did, give the verified definition and read the example sentence, showing briefly how the parts build the meaning.
-4. Ask for one sentence of their own using the word. If it misuses the word, correct it in one line. Do not ask for another sentence.
-5. Delegate.
+2. Take their first answer. Do not give hints or ask them to try again.
+3. In one or two sentences, tell them honestly how they did, give the verified definition and read the example sentence. Then delegate in the same turn.
 
-MODE RETEST (a word they missed a few words ago) and MODE REVIEW (the review round of the set):
+MODE RETEST (a word they missed earlier) and MODE REVIEW (a quick check of a word):
 1. Ask them to define it, without giving the roots.
-2. If they get it right, give one or two words of praise and delegate right away. No sentence needed.
-3. If they miss it or are only partly right, give the verified definition and example with a one line root reminder, then delegate. Tell them it will come back in a few words.
+2. If they get it right, give one or two words of praise and delegate in the same turn.
+3. If they miss it or are only partly right, give the verified definition and example in one or two sentences, then delegate in the same turn. Don't dwell on it: it comes back later.
 
-Don't make the learner repeat themselves: never ask them to say the definition back, never ask for more than one sentence, and never quiz the same word twice in a row. Each word should take well under a minute. If the learner asks to skip, give the definition and delegate; the word comes back later.
+Keep words short: one answer per word, then move on. Never ask for a sentence of their own, never ask them to say the definition back, never give a second try, and never quiz the same word twice in a row. Each word should take about thirty seconds. If the learner asks to skip, give the definition and delegate; the word comes back later.
 
 Grading: judge every answer yourself against the verified definition and react right away. Never wait for the backend before giving feedback. Be honest: say clearly when an answer is partly right or wrong, and praise only correct answers.
 
 Keep it flowing:
 - Keep each reply short: one or two sentences and one question at a time.
-- When you delegate, say only a very short bridge such as "Nice work." Do not say "let's move on" and then stop. The next word arrives within a second: introduce it immediately and ask your question, without waiting for the learner and without asking if they are ready.
-- Never pause the lesson or wait for permission to continue. Keep going word after word for as long as the learner is here.
+- Every turn you take must end with either a question for the learner or a delegation. Never end a turn with a statement like "let's move on" or "next word" and then go silent.
+- When you delegate, say only a very short bridge such as "Nice work." The next word arrives within a second: introduce it immediately and ask your question, without waiting for the learner and without asking if they are ready.
+- The learner should never have to say "next" or "okay". Never pause the lesson or wait for permission to continue. Keep going word after word for as long as the learner is here.
 - Only stop when the learner says they want to stop, for example "I'm done for today" or "let's wrap up". Then give a one sentence summary of their progress from the briefing and end with the exact words "See you next time." Never say "See you next time" at any other moment.
-- Mention progress now and then using the briefing, for example "That's six of ten down."
+- Mention progress now and then using the briefing, for example "That's six of ten done."
 - If the learner goes off topic or asks a question, answer briefly, then return to the word.
 
-Set rules: words come in sets of 10. First you go through each word once. Getting a word right on the first try, with no hints, clears it. A missed word comes back about ${RETEST_GAP} words later until they get it right on the first try. Once all 10 are cleared, you review every word in the set once more, with the same rule for misses. Then the next set starts.
+Set rules: words come in sets of 10 different words, and the goal is to see as many words as possible. A new word answered right gets one quick check a few words later, then it's done. A missed word comes back about ${RETEST_GAP} words later; one right answer finishes it. A word missed twice moves to the next set instead of holding this one up. Each set also mixes in a couple of words from earlier. The next set starts as soon as these 10 are done.
 
 Backchannel policy: Use moderate neutral listening sounds without taking over.
 Interruption policy: Stop your answer and listen when the learner interrupts.
@@ -216,53 +226,78 @@ function cachedWords(db: DB) {
 
 /** What is saved in the voice session's `summary` column so the next call resumes the same set. */
 export type SavedSet = {
-  v: 2;
+  v: 3;
   set_number: number;
-  phase: Phase;
   words: SetWord[];
   clock: number;
   last_slug: string | null;
   current: string | null;
   finished: string[];
+  carry: { slug: string; carries: number }[];
 };
 
-export function encodeSet(learner: Pick<Learner, "set" | "finished">, current: string | null): string {
+export function encodeSet(learner: Pick<Learner, "set" | "finished" | "carry">, current: string | null): string {
   const saved: SavedSet = {
-    v: 2,
+    v: 3,
     set_number: learner.set.setNumber,
-    phase: learner.set.phase,
     words: learner.set.words,
     clock: learner.set.clock,
     last_slug: learner.set.lastSlug,
     current,
     finished: [...learner.finished],
+    carry: learner.carry,
   };
   return JSON.stringify(saved);
 }
 
-type SavedWordV1 = { slug: string; asks?: number; streak?: number; firstTryCorrect?: boolean | null; lastAskedAt?: number };
-type SavedWord = Partial<SetWord> & SavedWordV1;
+type OldSavedWord = Partial<SetWord> & {
+  slug: string;
+  streak?: number;
+  phaseAsks?: number;
+  passed?: boolean;
+};
+const STATUSES: Status[] = ["new", "review", "check", "retry", "done", "carried"];
 
+/**
+ * Reads a saved set. Sets saved under older rules are converted so the learner moves on quickly:
+ * words already answered right are done, words answered wrong get one retest.
+ */
 export function decodeSet(summary: string | null | undefined, known: (slug: string) => boolean) {
   if (!summary) return null;
   try {
-    const saved = JSON.parse(summary) as Omit<SavedSet, "v" | "words" | "phase"> & { v: number; words: SavedWord[]; phase?: Phase };
-    if ((saved?.v !== 1 && saved?.v !== 2) || !Array.isArray(saved.words) || typeof saved.set_number !== "number") return null;
-    const v1 = saved.v === 1;
+    const saved = JSON.parse(summary) as {
+      v: number;
+      set_number: number;
+      words: OldSavedWord[];
+      clock?: number;
+      last_slug?: string | null;
+      current?: string | null;
+      finished?: unknown[];
+      carry?: { slug?: unknown; carries?: unknown }[];
+      phase?: string;
+    };
+    if (![1, 2, 3].includes(saved?.v) || !Array.isArray(saved.words) || typeof saved.set_number !== "number") return null;
+    const seen = new Set<string>();
     const words: SetWord[] = saved.words
-      .filter((w) => w && typeof w.slug === "string" && known(w.slug))
+      .filter((w) => w && typeof w.slug === "string" && known(w.slug) && !seen.has(w.slug) && seen.add(w.slug))
       .slice(0, SET_SIZE)
       .map((w) => {
         const asks = Number(w.asks) || 0;
+        let status: Status;
+        if (saved.v === 3) status = STATUSES.includes(w.status as Status) ? (w.status as Status) : "new";
+        else if (saved.v === 1) status = (Number(w.streak) || 0) >= 1 ? "done" : asks > 0 ? "retry" : "new";
+        else if (w.passed) status = "done";
+        else if ((Number(w.phaseAsks) || 0) > 0) status = "retry";
+        else status = saved.phase === "review" || asks > 0 ? "done" : "new";
         return {
           slug: w.slug,
+          status,
           asks,
-          // Sets saved under the old three-in-a-row rule: a word answered right last time counts as cleared.
-          phaseAsks: v1 ? asks : Number(w.phaseAsks) || 0,
-          passed: v1 ? (Number(w.streak) || 0) >= 1 : w.passed === true,
-          dueAt: v1 ? 0 : Number(w.dueAt) || 0,
+          misses: saved.v === 3 ? Number(w.misses) || 0 : 0,
+          dueAt: saved.v === 3 ? Number(w.dueAt) || 0 : 0,
           firstTryCorrect: typeof w.firstTryCorrect === "boolean" ? w.firstTryCorrect : null,
           lastAskedAt: Number.isFinite(w.lastAskedAt) ? Number(w.lastAskedAt) : -1,
+          carries: Number(w.carries) || 0,
         };
       });
     const set: VoiceSet = {
@@ -270,15 +305,14 @@ export function decodeSet(summary: string | null | undefined, known: (slug: stri
       clock: Number(saved.clock) || 0,
       lastSlug: typeof saved.last_slug === "string" ? saved.last_slug : null,
       setNumber: saved.set_number,
-      phase: saved.phase === "review" ? "review" : "learn",
     };
-    if (set.phase === "learn" && words.length >= SET_SIZE && words.every((w) => w.passed)) {
-      set.phase = "review";
-      for (const w of words) Object.assign(w, { passed: false, phaseAsks: 0, dueAt: 0 });
-    }
-    const finished = new Set((Array.isArray(saved.finished) ? saved.finished : []).filter((x) => typeof x === "string"));
-    const current = typeof saved.current === "string" && words.some((w) => w.slug === saved.current) ? saved.current : null;
-    return { set, finished, current };
+    const finished = new Set((Array.isArray(saved.finished) ? saved.finished : []).filter((x): x is string => typeof x === "string"));
+    const carry = (Array.isArray(saved.carry) ? saved.carry : [])
+      .filter((c): c is { slug: string; carries: number } => typeof c?.slug === "string" && known(c.slug))
+      .map((c) => ({ slug: c.slug, carries: Number(c.carries) || 0 }));
+    const current =
+      typeof saved.current === "string" && words.some((w) => w.slug === saved.current && isOpen(w)) ? saved.current : null;
+    return { set, finished, carry, current };
   } catch {
     return null;
   }
@@ -301,7 +335,17 @@ async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner
   const saved = decodeSet(lastSession.data?.summary, (slug) => words.has(slug));
   let learner: Learner;
   if (saved) {
-    learner = { ...auth, words, set: saved.set, finished: saved.finished, resumeSlug: saved.current, sessionId: null, reviewed: 0, correct: 0 };
+    learner = {
+      ...auth,
+      words,
+      set: saved.set,
+      finished: saved.finished,
+      carry: saved.carry,
+      resumeSlug: saved.current,
+      sessionId: null,
+      reviewed: 0,
+      correct: 0,
+    };
   } else {
     // No saved set yet (older data): rebuild it from saved voice answers.
     const events = await selectAll(
@@ -325,13 +369,9 @@ async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner
       return slug && verdicts.has(verdict) ? [{ slug, verdict, hintsUsed: e.hints_used ?? 0 }] : [];
     });
     const { set, finished } = replaySets(answers);
-    learner = { ...auth, words, set, finished, resumeSlug: null, sessionId: null, reviewed: 0, correct: 0 };
+    learner = { ...auth, words, set, finished, carry: [], resumeSlug: null, sessionId: null, reviewed: 0, correct: 0 };
   }
-  if (setComplete(learner.set)) {
-    learner.set.words.forEach((w) => learner.finished.add(w.slug));
-    learner.set = newSet([], learner.set.setNumber + 1);
-    learner.resumeSlug = null;
-  }
+  if (setComplete(learner.set)) startNextSet(learner);
   await topUpSet(learner);
   const row = await auth.db
     .from("study_sessions")
@@ -343,18 +383,83 @@ async function prepareLearner(auth: { db: DB; userId: string }): Promise<Learner
   return learner;
 }
 
-/** Fills open slots in the current set: due and weak words first, then new words. */
+/** Finishes the current set and starts the next one with the words carried over. */
+function startNextSet(learner: Learner) {
+  const prev = learner.set;
+  prev.words.forEach((w) => learner.finished.add(w.slug));
+  learner.set = nextSet(prev);
+  for (const c of learner.carry) {
+    addWord(learner.set, blankWord(c.slug, "retry", spacedDue(learner.set.words.length), c.carries + 1));
+  }
+  // Keep most of the new set for new words.
+  learner.set.words = learner.set.words.slice(0, MAX_OLDER_PER_SET);
+  learner.carry = [];
+  learner.resumeSlug = null;
+}
+
+/** Placement band from onboarding: 1 foundational, 2 intermediate, 3 advanced. */
+async function startBand(learner: Learner) {
+  try {
+    const { data } = await learner.db.from("user_preferences").select("target_level").eq("user_id", learner.userId).maybeSingle();
+    const level = (data as { target_level?: string } | null)?.target_level ?? "";
+    return ({ foundational: 1, intermediate: 2, advanced: 3 } as Record<string, number>)[level] ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * Fills open slots in the current set with different words: a couple of seen-before words that are
+ * due for review, then new words the learner has never studied. Never two entries for one word.
+ */
 async function topUpSet(learner: Learner) {
-  if (learner.set.words.length >= SET_SIZE) return;
-  const taken = (slug: string) => learner.finished.has(slug) || learner.set.words.some((w) => w.slug === slug);
-  const { items } = await buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 30 });
-  const picks: string[] = [];
-  for (const i of items) if (!taken(i.word.slug) && !picks.includes(i.word.slug)) picks.push(i.word.slug);
-  fillSet(learner.set, picks);
-  if (learner.set.words.length < SET_SIZE) {
-    for (const w of learner.words.values()) {
-      if (learner.set.words.length >= SET_SIZE) break;
-      if (!taken(w.slug)) fillSet(learner.set, [w.slug]);
+  const set = learner.set;
+  if (set.words.length >= SET_SIZE) return;
+  const textOf = (slug: string) => learner.words.get(slug)?.word.trim().toLowerCase() ?? slug;
+  const texts = new Set(set.words.map((w) => textOf(w.slug)));
+  const add = (slug: string, status: Status, dueAt = 0) => {
+    if (texts.has(textOf(slug)) || !addWord(set, blankWord(slug, status, dueAt))) return false;
+    texts.add(textOf(slug));
+    return true;
+  };
+
+  const [queue, states, band] = await Promise.all([
+    buildQueue(learner.db, learner.userId, { focus: "mixed", minutes: 30 }).catch(() => ({ items: [] })),
+    loadStates(learner.db, learner.userId).catch(() => []),
+    startBand(learner),
+  ]);
+
+  // A couple of older words that are due, spread through the set. At most 4 of the 10 are
+  // older words in all, counting words carried over from the last set, so most are new.
+  const older = set.words.filter((w) => w.status !== "new").length;
+  const allowed = Math.min(REVIEWS_PER_SET, Math.max(0, MAX_OLDER_PER_SET - older));
+  let reviews = 0;
+  for (const item of queue.items) {
+    if (reviews >= allowed) break;
+    if (item.reason !== "due" && item.reason !== "weak") continue;
+    if (add(item.word.slug, "review", spacedDue(older + reviews) + 1)) reviews += 1;
+  }
+
+  // Then new words: never studied, nearest the placement band first, common GRE words first.
+  const studied = new Set(states.filter((s) => s.item_type === "word").map((s) => s.item_id));
+  const all = [...learner.words.values()];
+  const fresh = all
+    .filter((w) => !studied.has(w.id) && !learner.finished.has(w.slug))
+    .sort(
+      (a, b) =>
+        Math.abs(a.difficulty - band) - Math.abs(b.difficulty - band) ||
+        b.gre_frequency - a.gre_frequency ||
+        a.word.localeCompare(b.word),
+    );
+  for (const w of fresh) {
+    if (set.words.length >= SET_SIZE) break;
+    add(w.slug, "new");
+  }
+  // Every word studied already: use words from outside earlier voice sets, then any word.
+  for (const pool of [all.filter((w) => !learner.finished.has(w.slug)), all]) {
+    for (const w of pool) {
+      if (set.words.length >= SET_SIZE) break;
+      add(w.slug, studied.has(w.id) ? "review" : "new");
     }
   }
 }
@@ -365,9 +470,9 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
     "WORD BRIEFING (silent reference facts for you; never read these labels aloud)",
     {
       teach: "Mode: TEACH. First time with this word.",
-      retest: "Mode: RETEST. They missed this word a few words ago.",
-      review: "Mode: REVIEW. Review round of this set.",
-    }[modeFor(set, entry)],
+      retest: "Mode: RETEST. They missed this word earlier.",
+      review: "Mode: REVIEW. A quick check of a word they've seen.",
+    }[modeFor(entry)],
     `Word: ${word.word} (${word.part_of_speech})`,
     `Definition: ${word.definition}`,
     `Plain English: ${word.plain_english}`,
@@ -381,10 +486,7 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
   }
   if (word.etymology) lines.push(`Etymology: ${word.etymology}`);
   if (word.confused_note) lines.push(`Commonly confused: ${word.confused_note}`);
-  lines.push(
-    `Progress: set ${set.setNumber}, ${set.phase === "learn" ? "first pass" : "review round"}: ` +
-      `${clearedCount(set)} of ${set.words.length} words cleared. Right on the first try clears this word.`,
-  );
+  lines.push(`Progress: set ${set.setNumber}: ${doneCount(set)} of ${set.words.length} words done.`);
   if (note) lines.push(note);
   return lines.join("\n");
 }
@@ -392,7 +494,7 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
 /** A short, natural line for the tutor to say aloud to introduce a word. */
 export function spokenIntro(word: WordWithParts, mode: Mode, lead = "Next word:") {
   if (mode === "retest") return `Let's try ${word.word} again. What does ${word.word} mean?`;
-  if (mode === "review") return `${lead === "Next word:" ? "Review:" : lead} ${word.word}. What does it mean?`;
+  if (mode === "review") return `${lead === "Next word:" ? "Quick check:" : lead} ${word.word}. What does it mean?`;
   const parts = word.parts.map((p) => `${p.surface} means "${p.root.meaning}"`);
   if (!parts.length) return `${lead} ${word.word}. What do you think ${word.word} means?`;
   return `${lead} ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
@@ -458,7 +560,10 @@ export function bindLiveConnection(
   let current: CurrentWord | undefined;
   /** Grades still being saved, by word slug. */
   const grading = new Map<string, Promise<void>>();
+  /** Words from a finished set whose grade is still coming, with how often they've moved sets. */
+  const lateGrades = new Map<string, number>();
   let delegationChain: Promise<void> = Promise.resolve();
+  let pendingDelegations = 0;
   let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
   let recentTutorText = "";
   let signedOff = false;
@@ -534,28 +639,71 @@ export function bindLiveConnection(
   function sendWord(delegationID: string | null, brief: string, spoken: string, lastEventID?: string) {
     sendCommentary(delegationID, brief, undefined, "thinking");
     sendCommentary(delegationID, spoken, lastEventID);
-    armNudge(spoken);
+    const word = current ? learner?.words.get(current.slug)?.word : undefined;
+    armNudge(spoken, word);
   }
 
+  function sendInstruction(content: string) {
+    if (closing || gateway?.readyState !== 1) return;
+    const bytes = new TextEncoder().encode(content);
+    gateway.send(
+      JSON.stringify({
+        type: "session.instructions.append",
+        event_id: crypto.randomUUID(),
+        delegation_id: null,
+        content: bytes.length > 480 ? new TextDecoder().decode(bytes.slice(0, 470)).replace(/\uFFFD$/, "") : content,
+      }),
+    );
+  }
+
+  /** The new word the tutor hasn't said aloud yet, and what the tutor has said since it arrived. */
+  let nudgeWord: string | undefined;
+  let saidSinceWord = "";
+  let nudges = 0;
   /**
-   * Backup in case the tutor still goes quiet after getting a new word: if nobody has spoken a few
-   * seconds later, tell it to carry on.
+   * Backup in case the tutor goes quiet after getting a new word: until the tutor actually says the
+   * new word (or the learner speaks), keep reminding it to carry on. A short "Nice work" bridge
+   * that finishes after the word arrived does not count.
    */
-  function armNudge(spoken: string) {
+  function armNudge(spoken: string, word?: string) {
     clearTimeout(nudgeTimer);
+    if (word !== undefined) {
+      nudgeWord = word.toLowerCase();
+      saidSinceWord = "";
+      nudges = 0;
+    }
     nudgeTimer = setTimeout(() => {
-      if (closing || gateway?.readyState !== 1) return;
-      const content = `Keep the lesson moving without waiting for the learner. Say this now: ${spoken}`;
-      const bytes = new TextEncoder().encode(content);
-      gateway.send(
-        JSON.stringify({
-          type: "session.instructions.append",
-          event_id: crypto.randomUUID(),
-          delegation_id: null,
-          content: bytes.length > 480 ? new TextDecoder().decode(bytes.slice(0, 470)).replace(/\uFFFD$/, "") : content,
-        }),
+      if (closing || gateway?.readyState !== 1 || nudges >= 3) return;
+      nudges += 1;
+      sendInstruction(`Keep the lesson moving without waiting for the learner. Say this now: ${spoken}`);
+      armNudge(spoken);
+    }, 4000);
+  }
+  function clearNudge() {
+    clearTimeout(nudgeTimer);
+    nudgeWord = undefined;
+  }
+
+  /** What the tutor has said in its current turn, since the learner last spoke. */
+  let tutorTurn = "";
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  let stalls = 0;
+  /**
+   * Backup in case the tutor finishes a word but goes quiet without asking the next question or
+   * delegating (for example after "Let's move on"). Silence after a question is the learner
+   * thinking, so it's left alone.
+   */
+  function armStall() {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      if (closing || signedOff || nudgeWord || pendingDelegations > 0 || stalls >= 2) return;
+      if (/\?\s*$/.test(tutorTurn.trim())) return;
+      stalls += 1;
+      sendInstruction(
+        "Don't wait for the learner to say next. If you've finished the current word, delegate to the backend now to get the next word. Otherwise ask your next question.",
       );
-    }, 5000);
+      armStall();
+    }, 6000);
   }
 
   function emitProgress() {
@@ -565,8 +713,7 @@ export function bindLiveConnection(
       type: "app.voice.progress",
       progress: {
         set_number: learner.set.setNumber,
-        phase: learner.set.phase,
-        cleared: clearedCount(learner.set),
+        done: doneCount(learner.set),
         set_size: learner.set.words.length,
         word: word?.word ?? null,
         mode: current?.mode ?? "teach",
@@ -577,7 +724,7 @@ export function bindLiveConnection(
   /** Makes `entry` the current word and returns its briefing and spoken introduction. */
   function startWord(entry: SetWord, note?: string, lead?: string) {
     const word = learner!.words.get(entry.slug)!;
-    const mode = modeFor(learner!.set, entry);
+    const mode = modeFor(entry);
     current = { slug: entry.slug, startIndex: transcripts.length, quickCheck: mode !== "teach", mode };
     emitProgress();
     saveState();
@@ -617,6 +764,7 @@ export function bindLiveConnection(
     clearTimeout(startupTimer);
     clearTimeout(closeTimer);
     clearTimeout(nudgeTimer);
+    clearTimeout(stallTimer);
     clearGreeting();
     setupAbort.abort();
     close(gateway);
@@ -630,6 +778,7 @@ export function bindLiveConnection(
     clearTimeout(startupTimer);
     clearTimeout(startTimer);
     clearTimeout(nudgeTimer);
+    clearTimeout(stallTimer);
     clearGreeting();
     if (gateway?.readyState === 1) {
       execution.waitUntil(
@@ -697,7 +846,16 @@ export function bindLiveConnection(
           sessionId: active.sessionId,
         });
       }
-      recordResult(active.set, word.slug, verdict, hints);
+      if (!recordResult(active.set, word.slug, verdict, hints) && lateGrades.has(word.slug)) {
+        // Its set already ended. A miss comes back in the current set if there's room, else the next.
+        const carries = lateGrades.get(word.slug)!;
+        lateGrades.delete(word.slug);
+        const inSet = active.set.words.some((w) => w.slug === word.slug);
+        if (!isClean(verdict, hints) && carries < MAX_CARRIES && !inSet) {
+          const added = addWord(active.set, blankWord(word.slug, "retry", active.set.clock + RETEST_GAP, carries + 1));
+          if (!added) active.carry.push({ slug: word.slug, carries });
+        }
+      }
       active.reviewed += 1;
       if (verdict === "correct" && hints === 0) active.correct += 1;
       saveState();
@@ -745,25 +903,26 @@ export function bindLiveConnection(
 
     // Pick the next word right away. Words still being graded are skipped.
     let pick = nextWord(active.set, new Set(grading.keys()));
-    if (!pick && grading.size) {
-      // Only words being graded are left open: their grades decide whether the set is done.
-      await Promise.race([Promise.allSettled([...grading.values()]), sleep(30_000)]);
-      if (closing) return;
-      pick = nextWord(active.set);
-    }
     let note: string | undefined;
     let lead: string | undefined;
-    if (!pick && setComplete(active.set)) {
-      active.set.words.forEach((w) => active.finished.add(w.slug));
-      active.set = newSet([], active.set.setNumber + 1);
+    if (!pick) {
+      // Nothing left to ask in this set except words still being graded. Don't make the learner
+      // wait for those grades: start the next set now. A late miss joins the set after that.
+      for (const w of active.set.words) {
+        if (!isOpen(w) || !grading.has(w.slug)) continue;
+        lateGrades.set(w.slug, w.carries);
+        w.status = "done";
+      }
+      const finishedSet = active.set.setNumber;
+      const justAsked = finishing?.slug ?? active.set.lastSlug;
+      startNextSet(active);
       await topUpSet(active);
       if (closing) return;
-      pick = nextWord(active.set);
-      note = `The learner just finished set ${active.set.setNumber - 1}, review round included.`;
-      lead = `That's set ${active.set.setNumber - 1} done, review and all! On to set ${active.set.setNumber}. First word:`;
-    } else if (pick && active.set.phase === "review" && active.set.words.every((w) => w.phaseAsks === 0)) {
-      note = "The learner just cleared all 10 words on the first pass. The review round starts now.";
-      lead = "That's all ten words! Now a quick review of the whole set. First:";
+      // Never open the new set with the word that was just asked.
+      active.set.lastSlug = justAsked;
+      pick = nextWord(active.set, new Set(grading.keys()));
+      note = `The learner just finished set ${finishedSet}.`;
+      lead = `That's set ${finishedSet} done! On to set ${active.set.setNumber}. First word:`;
     }
     if (!pick) {
       return deliver(id, "There are no more words available right now. Congratulate the learner on their progress and wrap up the session.");
@@ -800,20 +959,19 @@ export function bindLiveConnection(
       ) {
         if (greetingCommand.type === "instructions") {
           greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
-          const resume = learner!.set.words.find((w) => w.slug === learner!.resumeSlug && !w.passed);
+          const resume = learner!.set.words.find((w) => w.slug === learner!.resumeSlug && isOpen(w));
           const first = resume ?? nextWord(learner!.set);
           if (first) {
             const resuming = learner!.set.words.some((w) => w.asks > 0);
-            const done = clearedCount(learner!.set);
-            const round = learner!.set.phase === "learn" ? "on the first pass" : "in the review round";
+            const done = doneCount(learner!.set);
             const word = startWord(
               first,
               resuming ? "The learner is resuming this set from an earlier session." : undefined,
               resume ? "Let's go back to" : "First word:",
             );
             const hello = resuming
-              ? `Welcome back! Let's pick up set ${learner!.set.setNumber} right where you left off. You've cleared ${done} of ${learner!.set.words.length} words ${round} so far.`
-              : "Hi, I'm Lexi, your GRE vocabulary tutor. We'll work through a set of 10 words together until each one sticks.";
+              ? `Welcome back! Let's pick up set ${learner!.set.setNumber} right where you left off. You've finished ${done} of ${learner!.set.words.length} words so far.`
+              : "Hi, I'm Lexi, your GRE vocabulary tutor. Let's get through as many words as we can.";
             sendWord(null, word.brief, `${hello} ${word.spoken}`, greetingCommand.id);
           } else {
             sendCommentary(null, "Greet the learner and say there are no words available right now.", greetingCommand.id);
@@ -829,8 +987,19 @@ export function bindLiveConnection(
       if (event.type === "session.input_transcript.delta" || event.type === "session.output_transcript.delta") {
         const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
         if (!event.delta?.trim()) return;
-        if (role === "assistant" || !isListeningSound(event.delta)) clearTimeout(nudgeTimer);
+        if (role === "user" && !isListeningSound(event.delta)) {
+          clearNudge();
+          clearTimeout(stallTimer);
+          tutorTurn = "";
+          stalls = 0;
+        }
         if (role === "assistant") {
+          if (nudgeWord) {
+            saidSinceWord = (saidSinceWord + event.delta).slice(-300).toLowerCase();
+            if (saidSinceWord.includes(nudgeWord)) clearNudge();
+          }
+          tutorTurn = (tutorTurn + event.delta).slice(-300);
+          armStall();
           recentTutorText = (recentTutorText + event.delta).slice(-200);
           if (!signedOff && /see you next time/i.test(recentTutorText)) {
             signedOff = true;
@@ -849,9 +1018,14 @@ export function bindLiveConnection(
         const id = event.delegation?.id;
         if (id && event.delegation?.target === "client" && !delegations.has(id)) {
           delegations.add(id);
+          pendingDelegations += 1;
+          clearTimeout(stallTimer);
           emit({ type: "app.delegation.pending", delegation_id: id });
           delegationChain = delegationChain
             .then(() => handleDelegation(event))
+            .finally(() => {
+              pendingDelegations -= 1;
+            })
             .catch((error) => {
               console.error("Voice delegation failed", error);
               if (!closing) deliver(id, "Saving that word failed. Tell the learner briefly, then keep practicing the current word.");
