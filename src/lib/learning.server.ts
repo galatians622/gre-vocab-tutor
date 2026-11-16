@@ -26,7 +26,7 @@ export type WordPart = {
   position: number;
   surface: string;
   contribution: string;
-  root: Pick<RootRow, "id" | "slug" | "form" | "kind" | "meaning" | "origin">;
+  root: Pick<RootRow, "id" | "slug" | "form" | "kind" | "meaning" | "origin" | "source_word">;
 };
 export type WordWithParts = WordRow & { parts: WordPart[] };
 
@@ -65,7 +65,7 @@ export async function loadWordsWithParts(db: DB): Promise<WordWithParts[]> {
   const [words, parts, roots] = await Promise.all([
     selectAll((a, b) => db.from("words").select("*").order("word").order("id").range(a, b), "words"),
     selectAll((a, b) => db.from("word_morphemes").select("*").order("id").range(a, b), "word parts"),
-    selectAll((a, b) => db.from("roots").select("id, slug, form, kind, meaning, origin").order("id").range(a, b), "roots"),
+    selectAll((a, b) => db.from("roots").select("id, slug, form, kind, meaning, origin, source_word").order("id").range(a, b), "roots"),
   ]);
   const rootById = new Map(roots.map((r) => [r.id, r]));
   const byWord = new Map<string, WordPart[]>();

@@ -120,7 +120,7 @@ export async function gradeVoiceWord(input: {
     "Grade the learner's OWN definition: the first real attempt they made before the tutor stated the definition. If they only repeated the tutor's definition, that does not count as correct.",
     "definition_verdict — correct: captures the core meaning precisely enough to distinguish it from near-synonyms; partial: right direction but vague or missing a key nuance; incorrect: wrong or confused with another word; skipped: the learner never really tried or asked to skip.",
     "hints_used: how many hints or clues the tutor gave BEFORE the learner's attempt that you graded. 0 if none.",
-    "In first-time teaching mode the tutor always opens by breaking the word into its parts and giving their meanings. That opening breakdown is how the word is presented and is NOT a hint. Count only extra clues after it, such as leading questions or examples.",
+    "In first-time teaching mode the tutor always opens by breaking the word into its parts and giving their meanings. That opening breakdown, including where each root comes from and a familiar everyday word that shares it, is how the word is presented and is NOT a hint. Count only extra clues after it, such as leading questions or examples.",
     "In quick review mode the learner should define the word unaided, so any root meanings or clues the tutor gave before their attempt count as hints.",
     "learner_definition: the learner's attempt in a few words, or an empty string.",
     "explained_origin: true only if the learner themselves explained how a root, prefix or suffix builds the meaning. origin_verdict grades that explanation, or null if they did not try.",

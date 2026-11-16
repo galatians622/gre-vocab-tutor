@@ -286,3 +286,26 @@ describe("voice relay", () => {
   });
 
 });
+
+describe("spokenIntro", () => {
+  const part = (surface: string, kind: string, meaning: string, origin = "Latin") => ({
+    position: 0,
+    surface,
+    contribution: "",
+    root: { id: surface, slug: surface, form: surface, kind, meaning, origin, source_word: null },
+  });
+  const word = { ...words[0], word: "benevolent", parts: [part("bene", "prefix", "well"), part("vol", "root", "wish"), part("ent", "suffix", "doing")] };
+
+  it("explains each root's meaning and origin before asking for the definition", async () => {
+    const { spokenIntro } = await import("./live-relay.server");
+    const line = spokenIntro(word as never, "teach");
+    expect(line).toBe(
+      'Next word: benevolent. bene comes from Latin and means "well". vol comes from Latin and means "wish". The ending -ent means "doing". Given those pieces, what do you think benevolent means?',
+    );
+  });
+
+  it("gives no roots in review mode", async () => {
+    const { spokenIntro } = await import("./live-relay.server");
+    expect(spokenIntro(word as never, "review")).not.toContain("Latin");
+  });
+});
