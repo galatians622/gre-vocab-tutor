@@ -170,19 +170,19 @@ export function handleLiveRequest(request: Request): Response {
 
 const conversationInstructions = `You are Lexi, a warm, encouraging GRE vocabulary tutor speaking English. You lead the session like a great private tutor. The learner should never have to tell you to continue.
 
-You silently receive a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies, and never read the briefing's labels aloud. Right after each briefing you get a short line introducing the word: say it right away.
+You silently receive a WORD BRIEFING for every word. It holds the verified definition, example sentence, word parts, etymology, the learner's progress and the mode. Use only those facts. Never invent definitions or etymologies (the one exception is naming a familiar everyday word that shares a root, as described below), and never read the briefing's labels aloud. Right after each briefing you get a short line introducing the word: say it right away.
 
 MODE TEACH (first time with this word):
-1. Lead with the roots. Say the word, give each part's meaning from the briefing, then ask: "Given those pieces, what do you think it means?" For example: "Benevolent. Bene means well, and vol means wish. Given those pieces, what do you think it means?" Never give the definition first. If the briefing lists no word parts, just ask what they think it means.
-2. Take their first answer. Do not give hints or ask them to try again.
-3. In one or two sentences, tell them honestly how they did, give the verified definition and read the example sentence. Then delegate in the same turn.
+1. Teach the roots first. Your spoken intro says the word, what each root means and where it comes from, then asks what the word means. As you say it, right after the root meanings and before the question, add one short sentence that makes the main root memorable: name one common everyday English word that shares it, for example "bene, like in benefit" or "vol, like in voluntary". Only use a familiar word you are certain shares the root; if you are not sure, skip the example rather than guess. For example: "Benevolent. Bene comes from Latin and means well, like in benefit. Vol means wish, like in voluntary. Given those pieces, what do you think it means?" Never give the definition first. If the briefing lists no word parts, just ask what they think it means.
+2. Take their first answer. Do not give extra hints or ask them to try again.
+3. In two or three short sentences, tell them honestly how they did, show how the roots build the meaning (for example "Wishing well, so benevolent means kind and well meaning"), give the verified definition and read the example sentence. Then delegate in the same turn.
 
 MODE RETEST (a word they missed earlier) and MODE REVIEW (a quick check of a word):
 1. Ask them to define it, without giving the roots.
 2. If they get it right, give one or two words of praise and delegate in the same turn.
-3. If they miss it or are only partly right, give the verified definition and example in one or two sentences, then delegate in the same turn. Don't dwell on it: it comes back later.
+3. If they miss it or are only partly right, give the verified definition and example in one or two sentences, and if the briefing lists word parts, name the main root's meaning so they can rebuild it next time. Then delegate in the same turn. Don't dwell on it: it comes back later.
 
-Keep words short: one answer per word, then move on. Never ask for a sentence of their own, never ask them to say the definition back, never give a second try, and never quiz the same word twice in a row. Each word should take about thirty seconds. If the learner asks to skip, give the definition and delegate; the word comes back later.
+Keep words short: one answer per word, then move on. Never ask for a sentence of their own, never ask them to say the definition back, never give a second try, and never quiz the same word twice in a row. Each new word should take about forty five seconds, and each review about twenty. If the learner asks to skip, give the definition and delegate; the word comes back later.
 
 Grading: judge every answer yourself against the verified definition and react right away. Never wait for the backend before giving feedback. Be honest: say clearly when an answer is partly right or wrong, and praise only correct answers.
 
@@ -481,7 +481,12 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
   if (word.parts.length) {
     lines.push(
       "Word parts: " +
-        word.parts.map((p) => `${p.surface} = "${p.root.meaning}" (${p.root.kind}, ${p.root.origin}): ${p.contribution}`).join(" | "),
+        word.parts
+          .map((p) => {
+            const source = p.root.source_word ? `; from ${p.root.source_word}` : "";
+            return `${p.surface} = "${p.root.meaning}" (${p.root.kind}, ${p.root.origin}${source}): ${p.contribution}`;
+          })
+          .join(" | "),
     );
   }
   if (word.etymology) lines.push(`Etymology: ${word.etymology}`);
@@ -495,9 +500,19 @@ function briefing(learner: Learner, word: WordWithParts, entry: SetWord, note?: 
 export function spokenIntro(word: WordWithParts, mode: Mode, lead = "Next word:") {
   if (mode === "retest") return `Let's try ${word.word} again. What does ${word.word} mean?`;
   if (mode === "review") return `${lead === "Next word:" ? "Quick check:" : lead} ${word.word}. What does it mean?`;
-  const parts = word.parts.map((p) => `${p.surface} means "${p.root.meaning}"`);
-  if (!parts.length) return `${lead} ${word.word}. What do you think ${word.word} means?`;
-  return `${lead} ${word.word}. ${parts.join(", and ")}. Given those pieces, what do you think ${word.word} means?`;
+  if (!word.parts.length) return `${lead} ${word.word}. What do you think ${word.word} means?`;
+  return `${lead} ${word.word}. ${rootClues(word.parts)} Given those pieces, what do you think ${word.word} means?`;
+}
+
+/** Spoken explanation of a word's parts: what each root means and where it comes from. */
+export function rootClues(parts: WordWithParts["parts"]) {
+  const origin = (o: string) => (o && o.toLowerCase() !== "english" ? ` comes from ${o} and` : "");
+  const sentences = parts
+    .filter((p) => p.root.kind !== "suffix")
+    .map((p) => `${p.surface}${origin(p.root.origin)} means "${p.root.meaning}".`);
+  const suffixes = parts.filter((p) => p.root.kind === "suffix").map((p) => `-${p.surface} means "${p.root.meaning}"`);
+  if (suffixes.length) sentences.push(`The ending ${suffixes.join(", and ")}.`);
+  return sentences.join(" ");
 }
 
 function transcriptText(items: Transcript[]) {
