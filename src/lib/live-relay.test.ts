@@ -294,7 +294,15 @@ describe("spokenIntro", () => {
     contribution: "",
     root: { id: surface, slug: surface, form: surface, kind, meaning, origin, source_word: null },
   });
-  const word = { ...words[0], word: "benevolent", parts: [part("bene", "prefix", "well"), part("vol", "root", "wish"), part("ent", "suffix", "doing")] };
+  const word = {
+    ...words[0],
+    word: "benevolent",
+    parts: [
+      part("bene", "prefix", "well"),
+      part("vol", "root", "wish"),
+      part("ent", "suffix", "doing"),
+    ],
+  };
 
   it("explains each root's meaning and origin before asking for the definition", async () => {
     const { spokenIntro } = await import("./live-relay.server");
